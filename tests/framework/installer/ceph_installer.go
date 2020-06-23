@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster"
@@ -45,11 +44,10 @@ const (
 	// test with the latest nautilus build
 	nautilusTestImage = "ceph/ceph:v14"
 	// test with the latest octopus build
-	octopusTestImage   = "ceph/ceph:v15"
-	helmChartName      = "local/rook-ceph"
-	helmDeployName     = "rook-ceph"
-	cephOperatorLabel  = "app=rook-ceph-operator"
-	defaultclusterName = "test-cluster"
+	octopusTestImage  = "ceph/ceph:v15"
+	helmChartName     = "local/rook-ceph"
+	helmDeployName    = "rook-ceph"
+	cephOperatorLabel = "app=rook-ceph-operator"
 )
 
 var (
@@ -66,7 +64,6 @@ type CephInstaller struct {
 	hostPathToDelete string
 	helmHelper       *utils.HelmHelper
 	useHelm          bool
-	clusterName      string
 	k8sVersion       string
 	changeHostnames  bool
 	CephVersion      cephv1.CephVersionSpec
@@ -154,7 +151,7 @@ func (h *CephInstaller) CreateRookToolbox(namespace string) (err error) {
 
 // CreateRookCluster creates rook cluster via kubectl
 func (h *CephInstaller) CreateRookCluster(namespace, systemNamespace, storeType string, usePVC bool, storageClassName string,
-	mon cephv1.MonSpec, startWithAllNodes bool, cephVersion cephv1.CephVersionSpec) error {
+	mon cephv1.MonSpec, startWithAllNodes bool, rbdMirrorWorkers int, cephVersion cephv1.CephVersionSpec) error {
 
 	dataDirHostPath, err := h.initTestDir(namespace)
 	if err != nil {
@@ -203,7 +200,7 @@ osd_pool_default_size = 1
 	}
 
 	logger.Infof("Starting Rook Cluster with yaml")
-	settings := &clusterSettings{h.clusterName, namespace, storeType, dataDirHostPath, mon.Count, 0, usePVC, storageClassName, cephVersion}
+	settings := &ClusterSettings{namespace, storeType, dataDirHostPath, mon.Count, rbdMirrorWorkers, usePVC, storageClassName, cephVersion}
 	rookCluster := h.Manifests.GetRookCluster(settings)
 	if _, err := h.k8shelper.KubectlWithStdin(rookCluster, createFromStdinArgs...); err != nil {
 		return fmt.Errorf("Failed to create rook cluster : %v ", err)
@@ -219,6 +216,12 @@ osd_pool_default_size = 1
 
 	if err := h.k8shelper.WaitForPodCount("app=rook-ceph-osd", namespace, 1); err != nil {
 		return err
+	}
+
+	if rbdMirrorWorkers > 0 {
+		if err := h.k8shelper.WaitForPodCount("app=rook-ceph-rbd-mirror", namespace, rbdMirrorWorkers); err != nil {
+			return err
+		}
 	}
 
 	logger.Infof("Rook Cluster started")
@@ -260,7 +263,7 @@ func (h *CephInstaller) CreateRookExternalCluster(namespace, firstClusterNamespa
 
 	// Start the external cluster
 	logger.Infof("Starting Rook External Cluster with yaml")
-	settings := &clusterExternalSettings{namespace, dataDirHostPath}
+	settings := &ClusterExternalSettings{namespace, dataDirHostPath}
 	rookCluster := h.Manifests.GetRookExternalCluster(settings)
 	if _, err := h.k8shelper.KubectlWithStdin(rookCluster, createFromStdinArgs...); err != nil {
 		return fmt.Errorf("failed to create rook external cluster. %v ", err)
@@ -329,11 +332,10 @@ func (h *CephInstaller) GetRookExternalClusterMonSecret(namespace string) (*v1.S
 }
 
 func (h *CephInstaller) initTestDir(namespace string) (string, error) {
-	h.hostPathToDelete = path.Join(baseTestDir(), "rook-test")
+	h.hostPathToDelete = path.Join(baseTestDir, "rook-test")
 	testDir := path.Join(h.hostPathToDelete, namespace)
 
-	// skip the test dir creation if we are not running under "/data"
-	if baseTestDir() != "/data" {
+	if createBaseTestDir {
 		// Create the test dir on the local host
 		if err := os.MkdirAll(testDir, 0777); err != nil {
 			return "", err
@@ -398,14 +400,15 @@ func (h *CephInstaller) InstallRook(namespace, storeType string, usePVC bool, st
 	}
 	if !h.k8shelper.IsPodInExpectedState("rook-ceph-operator", onamespace, "Running") {
 		logger.Error("rook-ceph-operator is not running")
-		h.k8shelper.GetLogsFromNamespace(onamespace, "test-setup", testEnvName())
+		h.k8shelper.GetLogsFromNamespace(onamespace, "test-setup", Env.HostType)
 		logger.Error("rook-ceph-operator is not Running, abort!")
 		return false, err
 	}
 
 	// Create rook cluster
 	err = h.CreateRookCluster(namespace, onamespace, storeType, usePVC, storageClassName,
-		cephv1.MonSpec{Count: mon.Count, AllowMultiplePerNode: mon.AllowMultiplePerNode}, startWithAllNodes, h.CephVersion)
+		cephv1.MonSpec{Count: mon.Count, AllowMultiplePerNode: mon.AllowMultiplePerNode}, startWithAllNodes,
+		rbdMirrorWorkers, h.CephVersion)
 	if err != nil {
 		logger.Errorf("Rook cluster %s not installed, error -> %v", namespace, err)
 		return false, err
@@ -471,7 +474,7 @@ func (h *CephInstaller) UninstallRookFromMultipleNS(systemNamespace string, name
 		roles := h.Manifests.GetClusterRoles(namespace, systemNamespace)
 		_, err = h.k8shelper.KubectlWithStdin(roles, deleteFromStdinArgs...)
 
-		err = h.k8shelper.DeleteResourceAndWait(false, "-n", namespace, "cephcluster", h.clusterName)
+		err = h.k8shelper.DeleteResourceAndWait(false, "-n", namespace, "cephcluster", namespace)
 		checkError(h.T(), err, fmt.Sprintf("cannot remove cluster %s", namespace))
 
 		if h.cleanupHost {
@@ -480,9 +483,9 @@ func (h *CephInstaller) UninstallRookFromMultipleNS(systemNamespace string, name
 		}
 
 		crdCheckerFunc := func() error {
-			_, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(h.clusterName, metav1.GetOptions{})
+			_, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(namespace, metav1.GetOptions{})
 			// ensure the finalizer(s) are removed
-			h.removeClusterFinalizers(namespace)
+			h.removeClusterFinalizers(namespace, namespace)
 			return err
 		}
 		err = h.k8shelper.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
@@ -507,8 +510,7 @@ func (h *CephInstaller) UninstallRookFromMultipleNS(systemNamespace string, name
 		"cephclients.ceph.rook.io",
 		"volumes.rook.io",
 		"objectbuckets.objectbucket.io",
-		"objectbucketclaims.objectbucket.io",
-		"cephrbdmirrors.ceph.rook.io")
+		"objectbucketclaims.objectbucket.io")
 	checkError(h.T(), err, "cannot delete CRDs")
 
 	if h.useHelm {
@@ -597,16 +599,16 @@ func (h *CephInstaller) UninstallRookFromMultipleNS(systemNamespace string, name
 	}
 }
 
-func (h *CephInstaller) removeClusterFinalizers(namespace string) {
+func (h *CephInstaller) removeClusterFinalizers(namespace, name string) {
 	// Get the latest cluster instead of using the same instance in case it has been changed
-	cluster, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(h.clusterName, metav1.GetOptions{})
+	cluster, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		logger.Errorf("failed to remove finalizer. failed to get cluster. %+v", err)
 		return
 	}
 	objectMeta := &cluster.ObjectMeta
 	if len(objectMeta.Finalizers) == 0 {
-		logger.Infof("no finalizers to remove from cluster %s", namespace)
+		logger.Infof("no finalizers to remove from cluster %s", name)
 		return
 	}
 	objectMeta.Finalizers = nil
@@ -619,7 +621,7 @@ func (h *CephInstaller) removeClusterFinalizers(namespace string) {
 }
 
 func (h *CephInstaller) checkCephHealthStatus(namespace string) {
-	clusterResource, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(h.clusterName, metav1.GetOptions{})
+	clusterResource, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(namespace, metav1.GetOptions{})
 	assert.Nil(h.T(), err)
 	clusterPhase := string(clusterResource.Status.Phase)
 	if clusterPhase != "Ready" && clusterPhase != "Connected" {
@@ -630,7 +632,7 @@ func (h *CephInstaller) checkCephHealthStatus(namespace string) {
 	// If needed, give it a few seconds to settle and check the status again.
 	if clusterResource.Status.CephStatus.Health != "HEALTH_OK" {
 		time.Sleep(10 * time.Second)
-		clusterResource, err = h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(h.clusterName, metav1.GetOptions{})
+		clusterResource, err = h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(namespace, metav1.GetOptions{})
 		assert.Nil(h.T(), err)
 	}
 
@@ -649,45 +651,39 @@ func (h *CephInstaller) checkCephHealthStatus(namespace string) {
 }
 
 func (h *CephInstaller) cleanupDir(node, dir string) error {
-	resources := h.GetCleanupPod(node, dir)
+	resources := h.Manifests.GetCleanupPod(node, dir)
 	_, err := h.k8shelper.KubectlWithStdin(resources, createFromStdinArgs...)
 	return err
 }
 
 func (h *CephInstaller) verifyDirCleanup(node, dir string) error {
-	resources := h.GetCleanupVerificationPod(node, dir)
+	resources := h.Manifests.GetCleanupVerificationPod(node, dir)
 	_, err := h.k8shelper.KubectlWithStdin(resources, createFromStdinArgs...)
 	return err
 }
 
 func (h *CephInstaller) CollectOperatorLog(suiteName, testName, namespace string) {
-	if !h.T().Failed() && TestLogCollectionLevel() != "all" {
+	if !h.T().Failed() && Env.Logs != "all" {
 		return
 	}
 	name := fmt.Sprintf("%s_%s", suiteName, testName)
-	h.k8shelper.CollectPodLogsFromLabel(cephOperatorLabel, namespace, name, testEnvName())
+	h.k8shelper.CollectPodLogsFromLabel(cephOperatorLabel, namespace, name, Env.HostType)
 }
 
 func (h *CephInstaller) GatherAllRookLogs(testName string, namespaces ...string) {
-	if !h.T().Failed() && TestLogCollectionLevel() != "all" {
+	if !h.T().Failed() && Env.Logs != "all" {
 		return
 	}
 	logger.Infof("gathering all logs from the test")
 	for _, namespace := range namespaces {
-		h.k8shelper.GetLogsFromNamespace(namespace, testName, testEnvName())
-		h.k8shelper.GetPodDescribeFromNamespace(namespace, testName, testEnvName())
+		h.k8shelper.GetLogsFromNamespace(namespace, testName, Env.HostType)
+		h.k8shelper.GetPodDescribeFromNamespace(namespace, testName, Env.HostType)
 	}
 }
 
 // NewCephInstaller creates new instance of CephInstaller
-func NewCephInstaller(t func() *testing.T, clientset *kubernetes.Clientset, useHelm bool, clusterName, rookVersion string,
+func NewCephInstaller(t func() *testing.T, clientset *kubernetes.Clientset, useHelm bool, rookVersion string,
 	cephVersion cephv1.CephVersionSpec, cleanupHost bool) *CephInstaller {
-
-	// By default set a cluster name that is different from the namespace so we don't rely on the namespace
-	// in expected places
-	if clusterName == "" {
-		clusterName = defaultclusterName
-	}
 
 	// All e2e tests should run ceph commands in the toolbox since we are not inside a container
 	client.RunAllCephCommandsInToolbox = true
@@ -706,13 +702,12 @@ func NewCephInstaller(t func() *testing.T, clientset *kubernetes.Clientset, useH
 	h := &CephInstaller{
 		Manifests:       NewCephManifests(rookVersion),
 		k8shelper:       k8shelp,
-		helmHelper:      utils.NewHelmHelper(testHelmPath()),
+		helmHelper:      utils.NewHelmHelper(Env.Helm),
 		useHelm:         useHelm,
-		clusterName:     clusterName,
 		k8sVersion:      version.String(),
 		CephVersion:     cephVersion,
 		cleanupHost:     cleanupHost,
-		changeHostnames: rookVersion != Version1_2 && k8shelp.VersionAtLeast("v1.13.0"),
+		changeHostnames: rookVersion != Version1_1 && k8shelp.VersionAtLeast("v1.13.0"),
 		T:               t,
 	}
 	flag.Parse()
@@ -767,10 +762,6 @@ func (h *CephInstaller) WipeClusterDisks(namespace string) error {
 // (non-boot) disks on a node, allowing Ceph to use the disk(s) during its testing.
 func (h *CephInstaller) GetDiskWipeJob(nodeName, jobName, namespace string) string {
 	// put the wipe job in the cluster namespace so that logs get picked up in failure conditions
-	scratchDevice := os.Getenv("TEST_SCRATCH_DEVICE")
-	if scratchDevice == "" {
-		scratchDevice = "/dev/xvdc"
-	}
 	return `apiVersion: batch/v1
 kind: Job
 metadata:
@@ -812,6 +803,7 @@ spec:
                       # Wipe VGs
                       for vg in $(vgs --noheadings --readonly --separator=' ' -o vg_name); do
                         if [[ $vg =~ ^ceph- ]]; then
+                          lvremove --yes --force "$vg"
                           vgremove --yes --force "$vg"
                         fi
                       done
@@ -834,7 +826,7 @@ spec:
                       done
                       # Wipe the specific disk in the CI that was running in raw mode
                       set +Ee
-                      block=` + scratchDevice + `
+                      block=/dev/xvdc
                       wipefs --all "$block"
                       dd if=/dev/zero of="$block" bs=1M count=100 oflag=direct,dsync
                       set -Ee
@@ -862,77 +854,12 @@ spec:
 `
 }
 
-// GetCleanupPod gets a cleanup Pod that cleans up the dataDirHostPath
-func (h *CephInstaller) GetCleanupPod(node, removalDir string) string {
-	return `apiVersion: batch/v1
-kind: Job
-metadata:
-  name: rook-cleanup-` + uuid.Must(uuid.NewRandom()).String() + `
-spec:
-    template:
-      spec:
-          restartPolicy: Never
-          containers:
-              - name: rook-cleaner
-                image: rook/ceph:` + VersionMaster + `
-                securityContext:
-                    privileged: true
-                volumeMounts:
-                    - name: cleaner
-                      mountPath: /scrub
-                command:
-                    - "sh"
-                    - "-c"
-                    - "rm -rf /scrub/*"
-          nodeSelector:
-            kubernetes.io/hostname: ` + node + `
-          volumes:
-              - name: cleaner
-                hostPath:
-                   path:  ` + removalDir
-}
-
-// GetCleanupVerificationPod verifies that the dataDirHostPath is empty
-func (h *CephInstaller) GetCleanupVerificationPod(node, hostPathDir string) string {
-	return `apiVersion: batch/v1
-kind: Job
-metadata:
-  name: rook-verify-cleanup-` + uuid.Must(uuid.NewRandom()).String() + `
-spec:
-    template:
-      spec:
-          restartPolicy: Never
-          containers:
-              - name: rook-cleaner
-                image: rook/ceph:` + VersionMaster + `
-                securityContext:
-                    privileged: true
-                volumeMounts:
-                    - name: cleaner
-                      mountPath: /scrub
-                command:
-                    - "sh"
-                    - "-c"
-                    - |
-                      set -xEeuo pipefail
-                      #Assert dataDirHostPath is empty
-                      if [ "$(ls -A /scrub/)" ]; then
-                          exit 1
-                      fi
-          nodeSelector:
-            kubernetes.io/hostname: ` + node + `
-          volumes:
-              - name: cleaner
-                hostPath:
-                   path:  ` + hostPathDir
-}
-
 func (h *CephInstaller) addCleanupPolicy(namespace string) error {
-	cluster, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(h.clusterName, metav1.GetOptions{})
+	cluster, err := h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Get(namespace, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get ceph cluster. %+v", err)
 	}
-	cluster.Spec.CleanupPolicy.DeleteDataDirOnHosts = "yes-really-destroy-data"
+	cluster.Spec.CleanupPolicy.Confirmation = cephv1.DeleteDataDirOnHostsConfirmation
 	_, err = h.k8shelper.RookClientset.CephV1().CephClusters(namespace).Update(cluster)
 	if err != nil {
 		return fmt.Errorf("failed to add clean up policy to the cluster. %+v", err)

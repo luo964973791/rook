@@ -145,7 +145,7 @@ subjects:
 All Rook logs can be collected in a Kubernetes environment with the following command:
 
 ```console
-for p in $(kubectl -n rook-ceph get pods -o jsonpath='{.items[*].metadata.name}')
+(for p in $(kubectl -n rook-ceph get pods -o jsonpath='{.items[*].metadata.name}')
 do
     for c in $(kubectl -n rook-ceph get pod ${p} -o jsonpath='{.spec.containers[*].name}')
     do
@@ -239,8 +239,12 @@ a common practice for those looking to target certain workloads onto faster
 ### Placement Group Sizing
 
 > **NOTE**: Since Ceph Nautilus (v14.x), you can use the Ceph MGR `pg_autoscaler`
-> module to auto scale the PGs as needed. If you want to enable this feature,
-> please refer to [Default PG and PGP counts](ceph-configuration.md#default-pg-and-pgp-counts).
+> module to auto scale the PGs as needed, for more information on this topic
+> checkout [Ceph New in Nautilus: PG merging and autotuning](https://ceph.io/rados/new-in-nautilus-pg-merging-and-autotuning/) article.
+>
+> To enable the `pg_autoscaler` module automatically in a Rook Ceph cluster,
+> you can add the `pg_autoscaler` entry in the `spec.mgr.modules`
+> struct of CephCluster CRD.
 
 The general rules for deciding how many PGs your pool(s) should contain is:
 

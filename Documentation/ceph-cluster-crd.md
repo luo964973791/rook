@@ -107,7 +107,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
   Using the `v14` or similar tag is not recommended in production because it may lead to inconsistent versions of the image running across different nodes in the cluster.
   * `allowUnsupported`: If `true`, allow an unsupported major version of the Ceph release. Currently `nautilus` and `octopus` are supported. Future versions such as `pacific` would require this to be set to `true`. Should be set to `false` in production.
 * `dataDirHostPath`: The path on the host ([hostPath](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath)) where config and data should be stored for each of the services. If the directory does not exist, it will be created. Because this directory persists on the host, it will remain after pods are deleted. Following paths and any of their subpaths **must not be used**: `/etc/ceph`, `/rook` or `/var/log/ceph`.
-  * On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/site/content/en/docs/handbook/persistent_volumes.md#a-note-on-mounts-persistence-and-minikube-hosts) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
+  * On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/docs/persistent_volumes.md) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
   * **WARNING**: For test scenarios, if you delete a cluster and start a new cluster on the same hosts, the path used by `dataDirHostPath` must be deleted. Otherwise, stale keys and other config will remain from the previous cluster and the new mons will fail to start.
 If this value is empty, each pod will get an ephemeral directory to store their config files that is tied to the lifetime of the pod running on that node. More details can be found in the Kubernetes [empty dir docs](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir).
 * `skipUpgradeChecks`: if set to true Rook won't perform any upgrade checks on Ceph daemons during an upgrade. Use this at **YOUR OWN RISK**, only if you know what you're doing. To understand Rook's upgrade process of Ceph, read the [upgrade doc](Documentation/ceph-upgrade.html#ceph-version-upgrades).
@@ -128,6 +128,9 @@ If this value is empty, each pod will get an ephemeral directory to store their 
 For more details on the mons and when to choose a number other than `3`, see the [mon health design doc](https://github.com/rook/rook/blob/master/design/ceph/mon-health.md).
 * `mgr`: manager top level section
   * `modules`: is the list of Ceph manager modules to enable
+* `rbdMirroring`: The settings for rbd mirror daemon(s). Configuring which pools or images to be mirrored must be completed in the rook toolbox by running the
+[rbd mirror](http://docs.ceph.com/docs/mimic/rbd/rbd-mirroring/) command.
+  * `workers`: The number of rbd daemons to perform the rbd mirroring between clusters.
 * `crashCollector`: The settings for crash collector daemon(s).
   * `disable`: is set to `true`, the crash collector will not run on any node where a Ceph daemon runs
 * `annotations`: [annotations configuration settings](#annotations-configuration-settings)
@@ -150,7 +153,28 @@ For more details on the mons and when to choose a number other than `3`, see the
   * `machineDisruptionBudgetNamespace`: the namespace in which to watch the MachineDisruptionBudgets.
 * `removeOSDsIfOutAndSafeToRemove`: If `true` the operator will remove the OSDs that are down and whose data has been restored to other OSDs. In Ceph terms, the osds are `out` and `safe-to-destroy` when then would be removed.
 * `cleanupPolicy`: The section for confirming that cluster data should be forcibly deleted. The cleanupPolicy should only be added to the cluster when the cluster is about to be deleted. After any field of the cleanup policy is set, Rook will stop configuring the cluster as if the cluster is about to be destroyed in order to prevent these settings from being deployed unintentionally.
-  * `deleteDataDirOnHosts`: If `yes-really-destroy-data` the operator will automatically delete the hostpath of cluster nodes when a `delete cephcluster` command is issued. Only `yes-really-destroy-data` and an empty string are valid values for this field.
+  * `confirmation`: If `yes-really-destroy-data` the operator will automatically delete data on the hostpath of cluster nodes and clean devices with OSDs when a `delete cephcluster` command is issued. Only `yes-really-destroy-data` and an empty string are valid values for this field.
+
+To activate the cleanup, you can use the following command **AT YOUR OWN RISK**:
+
+```console
+kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'
+```
+
+When applied you will see the following from the Operator's logs:
+
+```text
+2020-05-27 13:24:04.267665 I | ceph-spec: CR has changed for "rook-ceph". diff=  v1.ClusterSpec{
+        ... // 16 identical fields
+        Mgr:                            v1.MgrSpec{},
+        RemoveOSDsIfOutAndSafeToRemove: false,
+-       CleanupPolicy:                  v1.CleanupPolicySpec{},
++       CleanupPolicy:                  v1.CleanupPolicySpec{Confirmation: "yes-really-destroy-data"},
+  }
+```
+
+Nothing will happen until the deletion of the CR is requested, so this can still be reverted.
+However, all new orchestration/reconciliation will be blocked with this cleanup policy enabled.
 
 ### Ceph container images
 
@@ -343,12 +367,14 @@ You can set annotations for Rook components for the list of key value pairs:
 * `mgr`: Set annotations for MGRs
 * `mon`: Set annotations for mons
 * `osd`: Set annotations for OSDs
+* `rbdmirror`: Set annotations for RBD Mirrors
+* `cleanup`: Set annotations for the cleanup job
 
 When other keys are set, `all` will be merged together with the specific component.
 
 ### Placement Configuration Settings
 
-Placement configuration for the cluster services. It includes the following keys: `mgr`, `mon` and `all`. Each service will have its placement configuration generated by merging the generic configuration under `all` with the most specific one (which will override any attributes).
+Placement configuration for the cluster services. It includes the following keys: `mgr`, `mon`, `rbdmirror`, `cleanup` and `all`. Each service will have its placement configuration generated by merging the generic configuration under `all` with the most specific one (which will override any attributes).
 
 **NOTE:** Placement of OSD pods is controlled using the [Storage Class Device Set](#storage-class-device-sets), not the general `placement` configuration.
 
@@ -377,10 +403,12 @@ You can set resource requests/limits for Rook components through the [Resource R
 * `mgr`: Set resource requests/limits for MGRs
 * `mon`: Set resource requests/limits for mons
 * `osd`: Set resource requests/limits for OSDs
+* `rbdmirror`: Set resource requests/limits for RBD Mirrors
 * `prepareosd`: Set resource requests/limits for OSD prepare job
 * `crashcollector`: Set resource requests/limits for crash. This pod runs wherever there is a Ceph pod running.
 It scrapes for Ceph daemon core dumps and sends them to the Ceph manager crash module so that core dumps are centralized and can be easily listed/accessed.
 You can read more about the [Ceph Crash module](https://docs.ceph.com/docs/master/mgr/crash/).
+* `cleanup`: Set resource requests/limits for cleanup job, responsible for wiping cluster's data after uninstall
 
 In order to provide the best possible experience running Ceph in containers, Rook internally enforces minimum memory limits if resource limits are passed.
 If a user configures a limit or request value that is too low, Rook will refuse to run the pod(s).
@@ -390,6 +418,7 @@ Here are the current minimum amounts of memory in MB to apply so that Rook will 
 * `mgr`: 512MB
 * `osd`: 2048MB
 * `mds`: 4096MB
+* `rbdmirror`: 512MB
 
 Rook does not enforce any minimum limit nor request on the following:
 
@@ -413,10 +442,12 @@ Priority class names can be specified so that the Rook components will have thos
 
 You can set priority class names for Rook components for the list of key value pairs:
 
-* `all`: Set priority class names for MGRs, Mons, OSDs.
+* `all`: Set priority class names for MGRs, Mons, OSDs, and RBD Mirrors.
 * `mgr`: Set priority class names for MGRs.
 * `mon`: Set priority class names for Mons.
 * `osd`: Set priority class names for OSDs.
+* `rbdmirror`: Set priority class names for RBD Mirrors.
+* `cleanup`: Set priority class names for the cleanup job.
 
 The specific component keys will act as overrides to `all`.
 

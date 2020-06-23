@@ -84,11 +84,11 @@ OSD on the same device. For steps on zapping the device see the [Rook cleanup in
 ## Patch Release Upgrades
 
 Unless otherwise noted due to extenuating requirements, upgrades from one patch release of Rook to
-another are as simple as updating the image of the Rook operator. For example, when Rook v1.3.1 is
+another are as simple as updating the image of the Rook operator. For example, when Rook v1.3.6 is
 released, the process of updating from v1.3.0 is as simple as running the following:
 
 ```console
-kubectl -n rook-ceph set image deploy/rook-ceph-operator rook-ceph-operator=rook/ceph:v1.3.1
+kubectl -n rook-ceph set image deploy/rook-ceph-operator rook-ceph-operator=rook/ceph:v1.3.6
 ```
 
 ## Helm Upgrades
@@ -145,6 +145,18 @@ In order to successfully upgrade a Rook cluster, the following prerequisites mus
   starting state.
 * All pods consuming Rook storage should be created, running, and in a steady state. No Rook
   persistent volumes should be in the act of being created or deleted.
+* Your Helm version should be newer than v3.2.0 for avoiding [this issue](https://github.com/helm/helm/issues/7697).
+* For the already deployed Rook cluster with the Helm older than v3.2.0, you also need to execute the following commands.
+
+```sh
+KIND=ClusterRole
+NAME=psp:rook
+RELEASE=your-apps-release-name
+NAMESPACE=your-apps-namespace
+kubectl annotate $KIND $NAME meta.helm.sh/release-name=$RELEASE
+kubectl annotate $KIND $NAME meta.helm.sh/release-namespace=$NAMESPACE
+kubectl label $KIND $NAME app.kubernetes.io/managed-by=Helm
+```
 
 ## Health Verification
 
@@ -152,7 +164,7 @@ Before we begin the upgrade process, let's first review some ways that you can v
 your cluster, ensuring that the upgrade is going smoothly after each step. Most of the health
 verification checks for your cluster during the upgrade process can be performed with the Rook
 toolbox. For more information about how to run the toolbox, please visit the
-[Rook toolbox readme](./ceph-toolbox.md).
+[Rook toolbox readme](./ceph-toolbox.md#running-the-toolbox-in-kubernetes).
 
 See the common issues pages for troubleshooting and correcting health issues:
 
@@ -261,7 +273,7 @@ Any pod that is using a Rook volume should also remain healthy:
 ## Rook Operator Upgrade Process
 
 In the examples given in this guide, we will be upgrading a live Rook cluster running `v1.2.7` to
-the version `v1.3.0`. This upgrade should work from any official patch release of Rook v1.2 to any
+the version `v1.3.6`. This upgrade should work from any official patch release of Rook v1.2 to any
 official patch release of v1.3. We will further assume that your previous cluster was created using
 an earlier version of this guide and manifests. If you have created custom manifests, these steps
 may not work as written.
@@ -313,7 +325,7 @@ The largest portion of the upgrade is triggered when the operator's image is upd
 When the operator is updated, it will proceed to update all of the Ceph daemons.
 
 ```sh
-kubectl -n $ROOK_SYSTEM_NAMESPACE set image deploy/rook-ceph-operator rook-ceph-operator=rook/ceph:v1.3.0
+kubectl -n $ROOK_SYSTEM_NAMESPACE set image deploy/rook-ceph-operator rook-ceph-operator=rook/ceph:v1.3.6
 ```
 
 ## 5. Wait for the upgrade to complete
@@ -331,17 +343,17 @@ watch --exec kubectl -n $ROOK_NAMESPACE get deployments -l rook_cluster=$ROOK_NA
 ```
 
 As an example, this cluster is midway through updating the OSDs from v1.2 to v1.3. When all
-deployments report `1/1/1` availability and `rook-version=v1.3.0`, the Ceph cluster's core
+deployments report `1/1/1` availability and `rook-version=v1.3.6`, the Ceph cluster's core
 components are fully updated.
 
 ```console
 Every 2.0s: kubectl -n rook-ceph get deployment -o j...
 
-rook-ceph-mgr-a         req/upd/avl: 1/1/1      rook-version=v1.3.0
-rook-ceph-mon-a         req/upd/avl: 1/1/1      rook-version=v1.3.0
-rook-ceph-mon-b         req/upd/avl: 1/1/1      rook-version=v1.3.0
-rook-ceph-mon-c         req/upd/avl: 1/1/1      rook-version=v1.3.0
-rook-ceph-osd-0         req/upd/avl: 1//        rook-version=v1.3.0
+rook-ceph-mgr-a         req/upd/avl: 1/1/1      rook-version=v1.3.6
+rook-ceph-mon-a         req/upd/avl: 1/1/1      rook-version=v1.3.6
+rook-ceph-mon-b         req/upd/avl: 1/1/1      rook-version=v1.3.6
+rook-ceph-mon-c         req/upd/avl: 1/1/1      rook-version=v1.3.6
+rook-ceph-osd-0         req/upd/avl: 1//        rook-version=v1.3.6
 rook-ceph-osd-1         req/upd/avl: 1/1/1      rook-version=v1.2.7
 rook-ceph-osd-2         req/upd/avl: 1/1/1      rook-version=v1.2.7
 ```
@@ -354,14 +366,14 @@ to proceed with the next step before the MDSes and RGWs are finished updating.
 # kubectl -n $ROOK_NAMESPACE get deployment -l rook_cluster=$ROOK_NAMESPACE -o jsonpath='{range .items[*]}{"rook-version="}{.metadata.labels.rook-version}{"\n"}{end}' | sort | uniq
 This cluster is not yet finished:
   rook-version=v1.2.7
-  rook-version=v1.3.0
+  rook-version=v1.3.6
 This cluster is finished:
-  rook-version=v1.3.0
+  rook-version=v1.3.6
 ```
 
 ## 6. Verify the updated cluster
 
-At this point, your Rook operator should be running version `rook/ceph:v1.3.0`.
+At this point, your Rook operator should be running version `rook/ceph:v1.3.6`.
 
 Verify the Ceph cluster's health using the [health verification section](#health-verification).
 
@@ -473,7 +485,7 @@ located.
 ```yaml
   env:
   - name: ROOK_CSI_CEPH_IMAGE
-    value: "quay.io/cephcsi/cephcsi:v2.0.1"
+    value: "quay.io/cephcsi/cephcsi:v2.1.2"
   - name: ROOK_CSI_REGISTRAR_IMAGE
     value: "quay.io/k8scsi/csi-node-driver-registrar:v1.2.0"
   - name: ROOK_CSI_PROVISIONER_IMAGE
@@ -493,7 +505,7 @@ are updated.
 
 ```console
 # kubectl --namespace rook-ceph get pod -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}' -l 'app in (csi-rbdplugin,csi-rbdplugin-provisioner,csi-cephfsplugin,csi-cephfsplugin-provisioner)' | sort | uniq
-quay.io/cephcsi/cephcsi:v2.0.1
+quay.io/cephcsi/cephcsi:v2.1.2
 quay.io/k8scsi/csi-attacher:v2.1.0
 quay.io/k8scsi/csi-node-driver-registrar:v1.2.0
 quay.io/k8scsi/csi-provisioner:v1.4.0

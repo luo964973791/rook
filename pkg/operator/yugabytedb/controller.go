@@ -70,6 +70,7 @@ const (
 	envGetHostsFromVal          = "dns"
 	envPodIP                    = "POD_IP"
 	envPodIPVal                 = "status.podIP"
+	envPodName                  = "POD_NAME"
 	envPodNameVal               = "metadata.name"
 	yugabyteDBImageName         = "yugabytedb/yugabyte:2.0.10.0-b4"
 	podCPULimitDefault          = "2"

@@ -33,6 +33,7 @@ import (
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephclientset "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1"
+	cephObject "github.com/rook/rook/pkg/operator/ceph/object"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-bucket-prov")
@@ -40,18 +41,20 @@ var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-bucket-prov")
 const (
 	genUserLen           = 8
 	cephUser             = "cephUser"
-	provisionerName      = "ceph.rook.io/bucket"
 	prefixObjectStoreSvc = "rook-ceph-rgw"
 	accessKeyIdKey       = "accessKeyID"
 	secretSecretKeyKey   = "secretAccessKey"
 	objectStoreName      = "objectStoreName"
 	objectStoreNamespace = "objectStoreNamespace"
+	objectStoreEndpoint  = "endpoint"
 )
 
 func NewBucketController(cfg *rest.Config, p *Provisioner) (*provisioner.Provisioner, error) {
 	const allNamespaces = ""
-	logger.Infof("Ceph Bucket Provisioner launched")
-	return provisioner.NewProvisioner(cfg, provisionerName, p, allNamespaces)
+	provName := cephObject.GetObjectBucketProvisioner(p.context, p.namespace)
+
+	logger.Infof("ceph bucket provisioner launched watching for provisioner %q", provName)
+	return provisioner.NewProvisioner(cfg, provName, p, allNamespaces)
 }
 
 // Return the secret namespace and name from the passed storage class.
@@ -78,6 +81,10 @@ func getObjectStoreName(sc *storagev1.StorageClass) string {
 
 func getObjectStoreNameSpace(sc *storagev1.StorageClass) string {
 	return sc.Parameters[objectStoreNamespace]
+}
+
+func getObjectStoreEndpoint(sc *storagev1.StorageClass) string {
+	return sc.Parameters[objectStoreEndpoint]
 }
 
 func getBucketName(ob *bktv1alpha1.ObjectBucket) string {

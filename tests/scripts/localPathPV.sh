@@ -1,15 +1,5 @@
 #!/bin/bash
 
-test_scratch_device=/dev/xvdc
-if [ $# -ge 1 ] ; then
-  test_scratch_device=$1
-fi
-
-if [ ! -b "${test_scratch_device}" ] ; then
-  echo "invalid scratch device name: ${test_scratch_device}" >&2
-  exit 1
-fi
-
 lsblk
 
 random_string=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)
@@ -113,7 +103,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   volumeMode: Block
   local:
-    path: "${test_scratch_device}" 
+    path: "/dev/xvdc" 
   nodeAffinity:
       required:
         nodeSelectorTerms:

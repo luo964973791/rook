@@ -20,7 +20,6 @@ package operator
 import (
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -31,12 +30,13 @@ import (
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume/attachment"
 	"github.com/rook/rook/pkg/operator/ceph/agent"
 	"github.com/rook/rook/pkg/operator/ceph/cluster"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
 	"github.com/rook/rook/pkg/operator/ceph/provisioner"
 	"github.com/rook/rook/pkg/operator/discover"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/controller"
 )
@@ -56,18 +56,15 @@ var provisionerConfigs = map[string]string{
 }
 
 var (
-	// EnableFlexDriver Whether to enable the flex driver. If true, the rook-ceph-agent daemonset will be started.
+	// Whether to enable the flex driver. If true, the rook-ceph-agent daemonset will be started.
 	EnableFlexDriver = true
-
-	// EnableDiscoveryDaemon Whether to enable the daemon for device discovery. If true, the rook-ceph-discover daemonset will be started.
+	// Whether to enable the daemon for device discovery. If true, the rook-ceph-discover daemonset will be started.
 	EnableDiscoveryDaemon = true
 
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
-
 	// WaitForRequeueIfCephClusterNotReadyAfter requeue after 10sec if the operator is not ready
 	WaitForRequeueIfCephClusterNotReadyAfter = 10 * time.Second
-
 	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
 	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: WaitForRequeueIfCephClusterNotReadyAfter}
 )
@@ -87,7 +84,7 @@ type Operator struct {
 
 // New creates an operator instance
 func New(context *clusterd.Context, volumeAttachmentWrapper attachment.Attachment, rookImage, securityAccount string) *Operator {
-	schemes := []k8sutil.CustomResource{opcontroller.ClusterResource, attachment.VolumeResource}
+	schemes := []k8sutil.CustomResource{cluster.ClusterResource, attachment.VolumeResource}
 
 	operatorNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
 	o := &Operator{
@@ -111,61 +108,57 @@ func New(context *clusterd.Context, volumeAttachmentWrapper attachment.Attachmen
 func (o *Operator) Run() error {
 
 	if o.operatorNamespace == "" {
-		return errors.Errorf("rook operator namespace is not provided. expose it via downward API in the rook operator manifest file using environment variable %q", k8sutil.PodNamespaceEnvVar)
+		return errors.Errorf("rook operator namespace is not provided. expose it via downward API in the rook operator manifest file using environment variable %s", k8sutil.PodNamespaceEnvVar)
 	}
 
 	if EnableDiscoveryDaemon {
 		rookDiscover := discover.New(o.context.Clientset)
 		if err := rookDiscover.Start(o.operatorNamespace, o.rookImage, o.securityAccount, true); err != nil {
-			return errors.Wrap(err, "failed to start device discovery daemonset")
+			return errors.Wrapf(err, "error starting device discovery daemonset")
 		}
 	}
 
 	serverVersion, err := o.context.Clientset.Discovery().ServerVersion()
 	if err != nil {
-		return errors.Wrap(err, "failed to get server version")
+		return errors.Wrapf(err, "error getting server version")
 	}
 
-	// Initialize signal handler
 	signalChan := make(chan os.Signal, 1)
 	stopChan := make(chan struct{})
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// For Flex Driver, run volume provisioner for each of the supported configurations
-	if EnableFlexDriver {
-		for name, vendor := range provisionerConfigs {
-			volumeProvisioner := provisioner.New(o.context, vendor)
-			pc := controller.NewProvisionController(
-				o.context.Clientset,
-				name,
-				volumeProvisioner,
-				serverVersion.GitVersion,
-			)
-			go pc.Run(stopChan)
-			logger.Infof("rook-provisioner %q started using %q flex vendor dir", name, vendor)
-		}
+	// Run volume provisioner for each of the supported configurations
+	for name, vendor := range provisionerConfigs {
+		volumeProvisioner := provisioner.New(o.context, vendor)
+		pc := controller.NewProvisionController(
+			o.context.Clientset,
+			name,
+			volumeProvisioner,
+			serverVersion.GitVersion,
+		)
+		go pc.Run(stopChan)
+		logger.Infof("rook-provisioner %s started using %s flex vendor dir", name, vendor)
 	}
 
 	var namespaceToWatch string
 	if os.Getenv("ROOK_CURRENT_NAMESPACE_ONLY") == "true" {
-		logger.Infof("watching the current namespace for a ceph cluster CR")
+		logger.Infof("Watching the current namespace for a cluster CRD")
 		namespaceToWatch = o.operatorNamespace
 	} else {
-		logger.Infof("watching all namespaces for ceph cluster CRs")
+		logger.Infof("Watching all namespaces for cluster CRDs")
 		namespaceToWatch = v1.NamespaceAll
 	}
 
 	// Start the controller-runtime Manager.
 	go o.startManager(namespaceToWatch, stopChan)
 
-	// Start the operator setting watcher
-	go o.clusterController.StartOperatorSettingsWatch(namespaceToWatch, stopChan)
+	// watch for changes to the rook clusters
+	o.clusterController.StartWatch(namespaceToWatch, stopChan)
 
-	// Signal handler to stop the operator
 	for {
 		select {
 		case <-signalChan:
-			logger.Info("shutdown signal received, exiting...")
+			logger.Infof("shutdown signal received, exiting...")
 			close(stopChan)
 			o.clusterController.StopWatch()
 			return nil
@@ -211,7 +204,7 @@ func (o *Operator) updateDrivers() error {
 		return errors.Wrapf(err, "error getting server version")
 	}
 
-	if err = o.setCSIParams(); err != nil {
+	if err = csi.SetParams(o.context.Clientset); err != nil {
 		return errors.Wrap(err, "failed to configure CSI parameters")
 	}
 
@@ -221,86 +214,60 @@ func (o *Operator) updateDrivers() error {
 	}
 
 	if serverVersion.Major < csi.KubeMinMajor || serverVersion.Major == csi.KubeMinMajor && serverVersion.Minor < csi.KubeMinMinor {
-		logger.Infof("CSI driver is only supported in K8s 1.13 or newer. version=%s", serverVersion.String())
+		logger.Infof("CSI drivers only supported in K8s 1.13 or newer. version=%s", serverVersion.String())
 		// disable csi control variables to disable other csi functions
 		csi.EnableRBD = false
 		csi.EnableCephFS = false
 		return nil
 	}
 
+	ownerRef, err := getDeploymentOwnerReference(o.context.Clientset, o.operatorNamespace)
+	if err != nil {
+		logger.Warningf("could not find deployment owner reference to assign to csi drivers. %v", err)
+	}
+	if ownerRef != nil {
+		blockOwnerDeletion := false
+		ownerRef.BlockOwnerDeletion = &blockOwnerDeletion
+	}
+
+	// create an empty config map. config map will be filled with data
+	// later when clusters have mons
+	err = csi.CreateCsiConfigMap(o.operatorNamespace, o.context.Clientset, ownerRef)
+	if err != nil {
+		return errors.Wrap(err, "failed creating csi config map")
+	}
+
 	if err = csi.ValidateCSIParam(); err != nil {
-		return errors.Wrapf(err, "invalid csi params")
+		return errors.Wrap(err, "invalid csi params")
 	}
 
-	if err = csi.ValidateCSIVersion(o.context.Clientset, o.operatorNamespace, o.rookImage, o.securityAccount); err != nil {
-		return errors.Wrap(err, "invalid csi version")
-	}
-
-	if err = csi.StartCSIDrivers(o.operatorNamespace, o.context.Clientset, serverVersion); err != nil {
-		return errors.Wrapf(err, "failed to start Ceph csi drivers")
-	}
-	logger.Infof("successfully started Ceph CSI driver(s)")
+	go csi.ValidateAndStartDrivers(o.context.Clientset, o.operatorNamespace, o.rookImage, o.securityAccount, serverVersion, ownerRef)
 	return nil
 }
 
-func (o *Operator) setCSIParams() error {
-	var err error
-
-	csiEnableRBD, err := k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_ENABLE_RBD", "true")
+// getDeploymentOwnerReference returns an OwnerReference to the rook-ceph-operator deployment
+func getDeploymentOwnerReference(clientset kubernetes.Interface, namespace string) (*metav1.OwnerReference, error) {
+	var deploymentRef *metav1.OwnerReference
+	podName := os.Getenv(k8sutil.PodNameEnvVar)
+	pod, err := clientset.CoreV1().Pods(namespace).Get(podName, metav1.GetOptions{})
 	if err != nil {
-		return errors.Wrap(err, "unable to determine if CSI driver for RBD is enabled")
+		return nil, errors.Wrapf(err, "could not find pod %q to find deployment owner reference", podName)
 	}
-	if csi.EnableRBD, err = strconv.ParseBool(csiEnableRBD); err != nil {
-		return errors.Wrap(err, "unable to parse value for 'ROOK_CSI_ENABLE_RBD'")
+	for _, podOwner := range pod.OwnerReferences {
+		if podOwner.Kind == "ReplicaSet" {
+			replicaset, err := clientset.AppsV1().ReplicaSets(namespace).Get(podOwner.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil, errors.Wrapf(err, "could not find replicaset %q to find deployment owner reference", podOwner.Name)
+			}
+			for _, replicasetOwner := range replicaset.OwnerReferences {
+				if replicasetOwner.Kind == "Deployment" {
+					deploymentRef = &replicasetOwner
+				}
+			}
+		}
 	}
-
-	csiEnableCephFS, err := k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_ENABLE_CEPHFS", "true")
-	if err != nil {
-		return errors.Wrap(err, "unable to determine if CSI driver for CephFS is enabled")
+	if deploymentRef == nil {
+		return nil, errors.New("could not find owner reference for rook-ceph deployment")
 	}
-	if csi.EnableCephFS, err = strconv.ParseBool(csiEnableCephFS); err != nil {
-		return errors.Wrap(err, "unable to parse value for 'ROOK_CSI_ENABLE_CEPHFS'")
-	}
-
-	csiAllowUnsupported, err := k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_ALLOW_UNSUPPORTED_VERSION", "false")
-	if err != nil {
-		return errors.Wrap(err, "unable to determine if unsupported version is allowed")
-	}
-	if csi.AllowUnsupported, err = strconv.ParseBool(csiAllowUnsupported); err != nil {
-		return errors.Wrap(err, "unable to parse value for 'ROOK_CSI_ALLOW_UNSUPPORTED_VERSION'")
-	}
-
-	csiEnableCSIGRPCMetrics, err := k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_ENABLE_GRPC_METRICS", "true")
-	if err != nil {
-		return errors.Wrap(err, "unable to determine if CSI GRPC metrics is enabled")
-	}
-	if csi.EnableCSIGRPCMetrics, err = strconv.ParseBool(csiEnableCSIGRPCMetrics); err != nil {
-		return errors.Wrap(err, "unable to parse value for 'ROOK_CSI_ENABLE_GRPC_METRICS'")
-	}
-
-	csi.CSIParam.CSIPluginImage, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_CEPH_IMAGE", csi.DefaultCSIPluginImage)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI plugin image")
-	}
-	csi.CSIParam.RegistrarImage, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_REGISTRAR_IMAGE", csi.DefaultRegistrarImage)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI registrar image")
-	}
-	csi.CSIParam.ProvisionerImage, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_PROVISIONER_IMAGE", csi.DefaultProvisionerImage)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI provisioner image")
-	}
-	csi.CSIParam.AttacherImage, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_ATTACHER_IMAGE", csi.DefaultAttacherImage)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI attacher image")
-	}
-	csi.CSIParam.SnapshotterImage, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_SNAPSHOTTER_IMAGE", csi.DefaultSnapshotterImage)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI snapshotter image")
-	}
-	csi.CSIParam.KubeletDirPath, err = k8sutil.GetOperatorSetting(o.context.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_CSI_KUBELET_DIR_PATH", csi.DefaultKubeletDirPath)
-	if err != nil {
-		return errors.Wrap(err, "unable to configure CSI kubelet directory path")
-	}
-	return nil
+	return deploymentRef, nil
 }

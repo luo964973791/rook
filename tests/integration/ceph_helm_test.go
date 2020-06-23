@@ -68,21 +68,10 @@ type HelmSuite struct {
 
 func (hs *HelmSuite) SetupSuite() {
 	hs.namespace = "helm-ns"
-	helmTestCluster := TestCluster{
-		namespace:               hs.namespace,
-		storeType:               "bluestore",
-		storageClassName:        "",
-		useHelm:                 true,
-		usePVC:                  false,
-		mons:                    1,
-		rbdMirrorWorkers:        1,
-		rookCephCleanup:         true,
-		minimalMatrixK8sVersion: helmMinimalTestVersion,
-		rookVersion:             installer.VersionMaster,
-		cephVersion:             installer.NautilusVersion,
-	}
-
-	hs.op, hs.kh = StartTestCluster(hs.T, &helmTestCluster)
+	mons := 1
+	rbdMirrorWorkers := 1
+	rookCephCleanup := true
+	hs.op, hs.kh = StartTestCluster(hs.T, helmMinimalTestVersion, hs.namespace, "bluestore", true, false, "", mons, rbdMirrorWorkers, installer.VersionMaster, installer.NautilusVersion, rookCephCleanup)
 	hs.helper = clients.CreateTestClient(hs.kh, hs.op.installer.Manifests)
 }
 

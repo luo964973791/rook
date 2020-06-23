@@ -17,7 +17,7 @@ allowHostDirVolumePlugin: true
 priority:
 allowedCapabilities: []
 allowHostPorts: true
-allowHostPID: true
+allowHostPID: true # remove this once we drop support for Nautilus
 allowHostIPC: true
 readOnlyRootFilesystem: false
 requiredDropCapabilities: []
@@ -122,12 +122,18 @@ data:
   # The default version of CSI supported by Rook will be started. To change the version
   # of the CSI driver to something other than what is officially supported, change
   # these images to the desired release of the CSI driver.
-  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v2.1.0"
+  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v2.1.2"
   # ROOK_CSI_REGISTRAR_IMAGE: "quay.io/k8scsi/csi-node-driver-registrar:v1.2.0"
   # ROOK_CSI_RESIZER_IMAGE: "quay.io/k8scsi/csi-resizer:v0.4.0"
   # ROOK_CSI_PROVISIONER_IMAGE: "quay.io/k8scsi/csi-provisioner:v1.4.0"
   # ROOK_CSI_SNAPSHOTTER_IMAGE: "quay.io/k8scsi/csi-snapshotter:v1.2.2"
   # ROOK_CSI_ATTACHER_IMAGE: "quay.io/k8scsi/csi-attacher:v2.1.0"
+
+  # (Optional) set user created priorityclassName for csi plugin pods.
+  # CSI_PLUGIN_PRIORITY_CLASSNAME: "system-node-critical"
+
+  # (Optional) set user created priorityclassName for csi provisioner pods.
+  # CSI_PROVISIONER_PRIORITY_CLASSNAME: "system-cluster-critical"
 
   # CSI CephFS plugin daemonset update strategy, supported values are OnDelete and RollingUpdate.
   # Default value is RollingUpdate.
@@ -317,6 +323,9 @@ data:
   # Configure CSI RBD grpc and liveness metrics port
   # CSI_RBD_GRPC_METRICS_PORT: "9090"
   # CSI_RBD_LIVENESS_METRICS_PORT: "9080"
+
+  # Whether the OBC provisioner should watch on the operator namespace or not, if not the namespace of the cluster will be used
+  ROOK_OBC_WATCH_OPERATOR_NAMESPACE: "true"
 ---
 # The deployment for the rook operator
 # OLM: BEGIN OPERATOR DEPLOYMENT
@@ -341,7 +350,7 @@ spec:
       serviceAccountName: rook-ceph-system
       containers:
       - name: rook-ceph-operator
-        image: rook/ceph:master
+        image: rook/ceph:v1.3.6
         args: ["ceph", "operator"]
         volumeMounts:
         - mountPath: /var/lib/rook

@@ -18,20 +18,15 @@ limitations under the License.
 package cluster
 
 import (
-	"context"
 	"os"
 	"time"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/daemon/ceph/config"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -41,23 +36,21 @@ const (
 
 // cephStatusChecker aggregates the mon/cluster info needed to check the health of the monitors
 type cephStatusChecker struct {
-	context        *clusterd.Context
-	resourceName   string
-	interval       time.Duration
-	externalCred   config.ExternalCred
-	client         client.Client
-	namespacedName types.NamespacedName
+	context      *clusterd.Context
+	namespace    string
+	resourceName string
+	interval     time.Duration
+	externalCred config.ExternalCred
 }
 
 // newCephStatusChecker creates a new HealthChecker object
-func newCephStatusChecker(context *clusterd.Context, resourceName string, externalCred config.ExternalCred, namespacedName types.NamespacedName) *cephStatusChecker {
+func newCephStatusChecker(context *clusterd.Context, namespace, resourceName string, externalCred config.ExternalCred) *cephStatusChecker {
 	c := &cephStatusChecker{
-		context:        context,
-		resourceName:   resourceName,
-		interval:       defaultStatusCheckInterval,
-		externalCred:   externalCred,
-		client:         context.Client,
-		namespacedName: namespacedName,
+		context:      context,
+		namespace:    namespace,
+		resourceName: resourceName,
+		interval:     defaultStatusCheckInterval,
+		externalCred: externalCred,
 	}
 
 	// allow overriding the check interval with an env var on the operator
@@ -90,24 +83,24 @@ func (c *cephStatusChecker) checkCephStatus(stopCh chan struct{}) {
 
 // checkStatus queries the status of ceph health then updates the CR status
 func (c *cephStatusChecker) checkStatus() {
-	var status cephclient.CephStatus
+	var status client.CephStatus
 	var err error
 
 	logger.Debugf("checking health of cluster")
 
 	// Set the user health check to the admin user
-	healthCheckUser := cephclient.AdminUsername
+	healthCheckUser := client.AdminUsername
 
 	// This is an external cluster OR if the admin keyring is not present
 	// As of 1.3 an external cluster is deployed it uses a different user to check ceph's status
 	if c.externalCred.Username != "" && c.externalCred.Secret != "" {
-		if c.externalCred.Username != cephclient.AdminUsername {
+		if c.externalCred.Username != client.AdminUsername {
 			healthCheckUser = c.externalCred.Username
 		}
 	}
 
 	// Check ceph's status
-	status, err = cephclient.StatusWithUser(c.context, c.namespacedName.Namespace, healthCheckUser)
+	status, err = client.StatusWithUser(c.context, c.namespace, healthCheckUser)
 	if err != nil {
 		logger.Errorf("failed to get ceph status. %v", err)
 		return
@@ -115,33 +108,30 @@ func (c *cephStatusChecker) checkStatus() {
 
 	logger.Debugf("Cluster status: %+v", status)
 	if err := c.updateCephStatus(&status); err != nil {
-		logger.Errorf("failed to query cluster status in namespace %q. %v", c.namespacedName.Namespace, err)
+		logger.Errorf("failed to query cluster status in namespace %q. %v", c.namespace, err)
 	}
 }
 
-// updateStatus updates an object with a given status
-func (c *cephStatusChecker) updateCephStatus(status *cephclient.CephStatus) error {
-	cephCluster := &cephv1.CephCluster{}
-	err := c.client.Get(context.TODO(), c.namespacedName, cephCluster)
+// updateCephStatus detects the latest health status from ceph and updates the CR status
+func (c *cephStatusChecker) updateCephStatus(status *client.CephStatus) error {
+
+	// get the most recent cluster CRD object
+	cluster, err := c.context.RookClientset.CephV1().CephClusters(c.namespace).Get(c.resourceName, metav1.GetOptions{})
 	if err != nil {
-		if kerrors.IsNotFound(err) {
-			logger.Debug("CephCluster resource not found. Ignoring since object must be deleted.")
-			return nil
-		}
-		return errors.Wrapf(err, "failed to retrieve ceph cluster %q to update status to %+v", c.namespacedName.Name, status)
+		return errors.Wrapf(err, "failed to get cluster from namespace %s prior to updating its status", c.namespace)
 	}
 
-	cephCluster.Status.CephStatus = toCustomResourceStatus(cephCluster.Status, status)
-	if err := opcontroller.UpdateStatus(c.client, cephCluster); err != nil {
-		return errors.Wrapf(err, "failed to update cluster %q status", c.namespacedName.Namespace)
+	// translate the ceph status struct to the crd status
+	cluster.Status.CephStatus = toCustomResourceStatus(cluster.Status, status)
+	if _, err := c.context.RookClientset.CephV1().CephClusters(c.namespace).Update(cluster); err != nil {
+		return errors.Wrapf(err, "failed to update cluster %s status", c.namespace)
 	}
 
-	logger.Debugf("ceph cluster %q status updated to %+v", c.namespacedName.Name, status)
 	return nil
 }
 
 // toCustomResourceStatus converts the ceph status to the struct expected for the CephCluster CR status
-func toCustomResourceStatus(currentStatus cephv1.ClusterStatus, newStatus *cephclient.CephStatus) *cephv1.CephStatus {
+func toCustomResourceStatus(currentStatus cephv1.ClusterStatus, newStatus *client.CephStatus) *cephv1.CephStatus {
 	s := &cephv1.CephStatus{
 		Health:      newStatus.Health.Status,
 		LastChecked: formatTime(time.Now().UTC()),
@@ -166,31 +156,4 @@ func toCustomResourceStatus(currentStatus cephv1.ClusterStatus, newStatus *cephc
 
 func formatTime(t time.Time) string {
 	return t.Format(time.RFC3339)
-}
-
-func (c *ClusterController) updateClusterCephVersion(image string, cephVersion cephver.CephVersion) {
-	logger.Infof("cluster %q: version %q detected for image %q", c.namespacedName.Namespace, cephVersion.String(), image)
-
-	cephCluster := &cephv1.CephCluster{}
-	err := c.client.Get(context.TODO(), c.namespacedName, cephCluster)
-	if err != nil {
-		if kerrors.IsNotFound(err) {
-			logger.Debug("CephCluster resource not found. Ignoring since object must be deleted.")
-			return
-		}
-		logger.Errorf("failed to retrieve ceph cluster %q to update ceph version to %+v. %v", c.namespacedName.Name, cephVersion, err)
-		return
-	}
-
-	cephClusterVersion := &cephv1.ClusterVersion{
-		Image:   image,
-		Version: opcontroller.GetCephVersionLabel(cephVersion),
-	}
-	// update the Ceph version on the retrieved cluster object
-	// do not overwrite the ceph status that is updated in a separate goroutine
-	cephCluster.Status.CephVersion = cephClusterVersion
-	if err := opcontroller.UpdateStatus(c.client, cephCluster); err != nil {
-		logger.Errorf("failed to update cluster %q version. %v", c.namespacedName.Name, err)
-		return
-	}
 }

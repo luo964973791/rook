@@ -154,7 +154,7 @@ spec:
             resources: {}
             cleanupPolicy:
               properties:
-                deleteDataDirOnHosts:
+                confirmation:
                   type: string
                   pattern: ^$|^yes-really-destroy-data$
   additionalPrinterColumns:
@@ -285,8 +285,6 @@ spec:
     - name: Age
       type: date
       JSONPath: .metadata.creationTimestamp
-  subresources:
-    status: {}
 ---
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
@@ -477,6 +475,8 @@ spec:
               - passive
               - aggressive
               - force
+            parameters:
+              type: object
   subresources:
     status: {}
 ---
@@ -562,30 +562,5 @@ spec:
           properties:
             caps:
               type: object
-  subresources:
-    status: {}
----
-apiVersion: apiextensions.k8s.io/v1beta1
-kind: CustomResourceDefinition
-metadata:
-  name: cephrbdmirrors.ceph.rook.io
-spec:
-  group: ceph.rook.io
-  names:
-    kind: CephRBDMirror
-    listKind: CephRBDMirrorList
-    plural: cephrbdmirrors
-    singular: cephrbdmirror
-  scope: Namespaced
-  version: v1
-  validation:
-    openAPIV3Schema:
-      properties:
-        spec:
-          properties:
-            count:
-              type: integer
-              minimum: 1
-              maximum: 100
   subresources:
     status: {}

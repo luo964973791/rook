@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/coreos/pkg/capnslog"
+	bktclient "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/clientset/versioned"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
@@ -70,6 +72,7 @@ var controllerTypeMeta = metav1.TypeMeta{
 // ReconcileCephObjectStore reconciles a cephObjectStore object
 type ReconcileCephObjectStore struct {
 	client          client.Client
+	bktclient       bktclient.Interface
 	scheme          *runtime.Scheme
 	context         *clusterd.Context
 	cephClusterSpec *cephv1.ClusterSpec
@@ -89,9 +92,10 @@ func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Rec
 	cephv1.AddToScheme(mgr.GetScheme())
 
 	return &ReconcileCephObjectStore{
-		client:  mgr.GetClient(),
-		scheme:  mgrScheme,
-		context: context,
+		client:    mgr.GetClient(),
+		scheme:    mgrScheme,
+		context:   context,
+		bktclient: bktclient.NewForConfigOrDie(context.KubeConfig),
 	}
 }
 
@@ -101,7 +105,6 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("successfully started")
 
 	// Watch for changes on the cephObjectStore CRD object
 	err = c.Watch(&source.Kind{Type: &cephv1.CephObjectStore{TypeMeta: controllerTypeMeta}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchControllerPredicate())
@@ -156,7 +159,7 @@ func (r *ReconcileCephObjectStore) reconcile(request reconcile.Request) (reconci
 	}
 
 	// Make sure a CephCluster is present otherwise do nothing
-	cephClusterSpec, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
+	cephCluster, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
 		// This handles the case where the Ceph Cluster is gone and we want to delete that CR
 		// We skip the deleteStore() function since everything is gone already
@@ -177,7 +180,7 @@ func (r *ReconcileCephObjectStore) reconcile(request reconcile.Request) (reconci
 
 		return reconcileResponse, nil
 	}
-	r.cephClusterSpec = &cephClusterSpec
+	r.cephClusterSpec = &cephCluster.Spec
 
 	// Populate clusterInfo
 	// Always populate it during each reconcile
@@ -203,10 +206,18 @@ func (r *ReconcileCephObjectStore) reconcile(request reconcile.Request) (reconci
 	// DELETE: the CR was deleted
 	if !cephObjectStore.GetDeletionTimestamp().IsZero() {
 		logger.Debugf("deleting store %q", cephObjectStore.Name)
+
+		response, ok := r.verifyObjectBucketCleanup(cephObjectStore)
+		if !ok {
+			// If the object store cannot be deleted, requeue the request for deletion to see if the conditions
+			// will eventually be satisfied such as the object buckets being removed
+			return response, nil
+		}
+
 		cfg := clusterConfig{context: r.context, store: cephObjectStore}
-		err := cfg.deleteStore()
+		err = cfg.deleteStore()
 		if err != nil {
-			return reconcile.Result{}, errors.Wrapf(err, "failed to delete store %q. ", cephObjectStore.Name)
+			return reconcile.Result{}, errors.Wrapf(err, "failed to delete store %q", cephObjectStore.Name)
 		}
 
 		// Remove finalizer
@@ -318,4 +329,28 @@ func updateStatus(client client.Client, name types.NamespacedName, status string
 		return
 	}
 	logger.Debugf("object store %q status updated to %q", name, status)
+}
+
+func (r *ReconcileCephObjectStore) verifyObjectBucketCleanup(objectstore *cephv1.CephObjectStore) (reconcile.Result, bool) {
+	bktProvsioner := GetObjectBucketProvisioner(r.context, objectstore.Namespace)
+	bktProvsioner = strings.Replace(bktProvsioner, "/", "-", -1)
+	selector := fmt.Sprintf("bucket-provisioner=%s", bktProvsioner)
+	objectBuckets, err := r.bktclient.ObjectbucketV1alpha1().ObjectBuckets().List(metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		logger.Errorf("failed to delete object store. failed to list buckets for objectstore %q in namespace %q", objectstore.Name, objectstore.Namespace)
+		return opcontroller.WaitForRequeueIfFinalizerBlocked, false
+	}
+
+	if len(objectBuckets.Items) == 0 {
+		logger.Infof("no buckets found for objectstore %q in namespace %q", objectstore.Name, objectstore.Namespace)
+		return reconcile.Result{}, true
+	}
+
+	bucketNames := make([]string, 0)
+	for _, bucket := range objectBuckets.Items {
+		bucketNames = append(bucketNames, bucket.Name)
+	}
+
+	logger.Errorf("failed to delete object store. buckets for objectstore %q in namespace %q are not cleaned up. remaining buckets: %+v", objectstore.Name, objectstore.Namespace, bucketNames)
+	return opcontroller.WaitForRequeueIfFinalizerBlocked, false
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -39,14 +40,12 @@ type daemonConfig struct {
 	ResourceName string              // the name rook gives to mirror resources in k8s metadata
 	DaemonID     string              // the ID of the Ceph daemon ("a", "b", ...)
 	DataPathMap  *config.DataPathMap // location to store data in container
-	ownerRef     metav1.OwnerReference
-	namespace    string
 }
 
-func (r *ReconcileCephRBDMirror) generateKeyring(daemonConfig *daemonConfig) (string, error) {
+func (m *Mirroring) generateKeyring(daemonConfig *daemonConfig) (string, error) {
 	user := fullDaemonName(daemonConfig.DaemonID)
 	access := []string{"mon", "profile rbd-mirror", "osd", "profile rbd"}
-	s := keyring.GetSecretStore(r.context, daemonConfig.namespace, &daemonConfig.ownerRef)
+	s := keyring.GetSecretStore(m.context, m.Namespace, &m.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
@@ -54,7 +53,7 @@ func (r *ReconcileCephRBDMirror) generateKeyring(daemonConfig *daemonConfig) (st
 	}
 
 	// Delete legacy key store for upgrade from Rook v0.9.x to v1.0.x
-	err = r.context.Clientset.CoreV1().Secrets(daemonConfig.namespace).Delete(daemonConfig.ResourceName, &metav1.DeleteOptions{})
+	err = m.context.Clientset.CoreV1().Secrets(m.Namespace).Delete(daemonConfig.ResourceName, &metav1.DeleteOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.Debugf("legacy rbd-mirror key %q is already removed", daemonConfig.ResourceName)
@@ -65,6 +64,11 @@ func (r *ReconcileCephRBDMirror) generateKeyring(daemonConfig *daemonConfig) (st
 
 	keyring := fmt.Sprintf(keyringTemplate, daemonConfig.DaemonID, key)
 	return keyring, s.CreateOrUpdate(daemonConfig.ResourceName, keyring)
+}
+
+func (m *Mirroring) associateKeyring(existingKeyring string, d *apps.Deployment) error {
+	s := keyring.GetSecretStoreForDeployment(m.context, d)
+	return s.CreateOrUpdate(d.GetName(), existingKeyring)
 }
 
 func fullDaemonName(daemonID string) string {

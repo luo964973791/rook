@@ -31,7 +31,6 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	oposd "github.com/rook/rook/pkg/operator/ceph/cluster/osd"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/util/sys"
 )
 
@@ -68,12 +67,14 @@ func StartOSD(context *clusterd.Context, osdType, osdID, osdUUID, lvPath string,
 
 		go handleTerminate(context, lvPath, volumeGroupName)
 
-		if err := context.Executor.ExecuteCommand("vgchange", "-an", volumeGroupName); err != nil {
-			return errors.Wrapf(err, "failed to deactivate volume group for lv %q", lvPath)
+		// It's fine to continue if deactivate fails since we will return error if activate fails
+		if op, err := context.Executor.ExecuteCommandWithCombinedOutput("vgchange", "-an", "-vv", volumeGroupName); err != nil {
+			logger.Errorf("failed to deactivate volume group for lv %q. output: %s. %v", lvPath, op, err)
+			return nil
 		}
 
-		if err := context.Executor.ExecuteCommand("vgchange", "-ay", volumeGroupName); err != nil {
-			return errors.Wrapf(err, "failed to activate volume group for lv %q", lvPath)
+		if op, err := context.Executor.ExecuteCommandWithCombinedOutput("vgchange", "-ay", "-vv", volumeGroupName); err != nil {
+			return errors.Wrapf(err, "failed to activate volume group for lv %q. output: %s", lvPath, op)
 		}
 	}
 
@@ -91,7 +92,10 @@ func StartOSD(context *clusterd.Context, osdType, osdID, osdUUID, lvPath string,
 
 	if pvcBackedOSD && !lvBackedPV {
 		if err := releaseLVMDevice(context, volumeGroupName); err != nil {
-			return errors.Wrapf(err, "failed to release device from lvm")
+			// Let's just report the error and not fail as a best-effort since some drivers will force detach anyway
+			// Failing to release the device does not means the detach will fail so let's proceed
+			logger.Errorf("failed to release device from lvm. %v", err)
+			return nil
 		}
 	}
 
@@ -209,7 +213,7 @@ func Provision(context *clusterd.Context, agent *OsdAgent, crushLocation string)
 	logger.Info("creating and starting the osds")
 
 	// determine the set of devices that can/should be used for OSDs.
-	devices, err := getAvailableDevices(context, agent.devices, agent.metadataDevice, agent.pvcBacked, agent.cluster.CephVersion)
+	devices, err := getAvailableDevices(context, agent)
 	if err != nil {
 		return errors.Wrap(err, "failed to get available devices")
 	}
@@ -277,8 +281,8 @@ func Provision(context *clusterd.Context, agent *OsdAgent, crushLocation string)
 	return nil
 }
 
-func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevice, metadataDevice string, pvcBacked bool, cephVersion cephver.CephVersion) (*DeviceOsdMapping, error) {
-
+func getAvailableDevices(context *clusterd.Context, agent *OsdAgent) (*DeviceOsdMapping, error) {
+	desiredDevices := agent.devices
 	logger.Debugf("desiredDevices are %+v", desiredDevices)
 	logger.Debugf("context.Devices are %+v", context.Devices)
 
@@ -302,7 +306,7 @@ func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevi
 		// If we detect a partition we have to make sure that ceph-volume will be able to consume it
 		// ceph-volume version 14.2.8 has the right code to support partitions
 		if device.Type == sys.PartType {
-			if !cephVersion.IsAtLeast(cephVolumeRawModeMinCephVersion) {
+			if !agent.cluster.CephVersion.IsAtLeast(cephVolumeRawModeMinCephVersion) {
 				logger.Infof("skipping device %q because it is a partition and ceph version is too old, you need at least ceph %q", device.Name, cephVolumeRawModeMinCephVersion.String())
 				continue
 			}
@@ -319,9 +323,26 @@ func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevi
 		//
 		// So earlier lsblk extracted the '/dev' path, hence the device.Name property
 		// device.Name can be 'xvdca', later this is formated to '/dev/xvdca'
-		isAvailable, rejectedReason, err := sys.CheckIfDeviceAvailable(context.Executor, device.RealPath, pvcBacked)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to get device %q info", device.Name)
+		var err error
+		var isAvailable bool
+		rejectedReason := ""
+		if agent.pvcBacked {
+			block := fmt.Sprintf("/mnt/%s", agent.nodeName)
+			rawOsds, err := GetCephVolumeRawOSDs(context, agent.cluster.Name, agent.cluster.FSID, block, agent.metadataDevice, false)
+			if err != nil {
+				isAvailable = false
+				rejectedReason = fmt.Sprintf("failed to detect if there is already an osd. %v", err)
+			} else if len(rawOsds) > 0 {
+				isAvailable = false
+				rejectedReason = "already in use by a raw OSD, no need to reconfigure"
+			} else {
+				isAvailable = true
+			}
+		} else {
+			isAvailable, rejectedReason, err = sys.CheckIfDeviceAvailable(context.Executor, device.RealPath, agent.pvcBacked)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to get device %q info", device.Name)
+			}
 		}
 
 		if !isAvailable {
@@ -332,7 +353,7 @@ func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevi
 		}
 
 		var deviceInfo *DeviceOsdIDEntry
-		if metadataDevice != "" && metadataDevice == device.Name {
+		if agent.metadataDevice != "" && agent.metadataDevice == device.Name {
 			// current device is desired as the metadata device
 			deviceInfo = &DeviceOsdIDEntry{Data: unassignedOSDID, Metadata: []int{}}
 		} else if len(desiredDevices) == 1 && desiredDevices[0].Name == "all" {
@@ -408,7 +429,7 @@ func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevi
 			// So it's fine to name the first entry of the map "data" instead of the PVC name
 			// It is particularly useful when a metadata PVC is used because we need to identify it in the map
 			// So the entry must be named "metadata" so it can accessed later
-			if pvcBacked {
+			if agent.pvcBacked {
 				if device.Type == pvcDataTypeDevice {
 					available.Entries[pvcDataTypeDevice] = deviceInfo
 				} else if device.Type == pvcMetadataTypeDevice {
@@ -425,10 +446,10 @@ func getAvailableDevices(context *clusterd.Context, desiredDevices []DesiredDevi
 
 // releaseLVMDevice deactivates the LV to release the device.
 func releaseLVMDevice(context *clusterd.Context, volumeGroupName string) error {
-	if err := context.Executor.ExecuteCommand("lvchange", "-an", volumeGroupName); err != nil {
-		return errors.Wrapf(err, "failed to deactivate LVM %s", volumeGroupName)
+	if op, err := context.Executor.ExecuteCommandWithCombinedOutput("lvchange", "-an", "-vv", volumeGroupName); err != nil {
+		return errors.Wrapf(err, "failed to deactivate LVM %s. output: %s", volumeGroupName, op)
 	}
-	logger.Info("Successfully released device from lvm")
+	logger.Info("successfully released device from lvm")
 	return nil
 }
 

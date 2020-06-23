@@ -58,6 +58,12 @@ csi:
   enableCephfsDriver: true
   enableGrpcMetrics: true
   enableSnapshotter: true
+  # (Optional) set user created priorityclassName for csi plugin pods.
+  # pluginPriorityClassName: system-node-critical
+
+  # (Optional) set user created priorityclassName for csi provisioner pods.
+  # provisionerPriorityClassName: system-cluster-critical
+
   # Set logging level for csi containers.
   # Supported values from 0 to 5. 0 for general useful logs, 5 for trace level verbosity.
   #logLevel: 0
@@ -241,7 +247,7 @@ csi:
   #rbdLivenessMetricsPort: 9080
   #kubeletDirPath: /var/lib/kubelet
   #cephcsi:
-    #image: quay.io/cephcsi/cephcsi:v2.1.0
+    #image: quay.io/cephcsi/cephcsi:v2.1.2
   #registrar:
     #image: quay.io/k8scsi/csi-node-driver-registrar:v1.2.0
   #provisioner:
@@ -312,3 +318,6 @@ discoverDaemonUdev:
 # imagePullSecrets option allow to pull docker images from private docker registry. Option will be passed to all service accounts.
 # imagePullSecrets:
 # - name: my-registry-secret
+
+# Whether the OBC provisioner should watch on the operator namespace or not, if not the namespace of the cluster will be used
+enableOBCWatchOperatorNamespace: true

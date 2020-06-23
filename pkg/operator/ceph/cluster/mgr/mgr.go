@@ -52,7 +52,7 @@ const (
 	serviceAccountName     = "rook-ceph-mgr"
 	prometheusModuleName   = "prometheus"
 	crashModuleName        = "crash"
-	pgautoscalerModuleName = "pg_autoscaler"
+	PgautoscalerModuleName = "pg_autoscaler"
 	balancerModuleName     = "balancer"
 	balancerModuleMode     = "upmap"
 	metricsPort            = 9283
@@ -159,9 +159,8 @@ func (c *Cluster) Start() error {
 			DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MgrType, daemonID, c.Namespace, c.dataDirHostPath),
 		}
 
-		// We set the owner reference of the Secret to the Object controller instead of the replicaset
-		// because we watch for that resource and reconcile if anything happens to it
-		_, err := c.generateKeyring(mgrConfig)
+		// generate keyring specific to this mgr daemon saved to k8s secret
+		keyring, err := c.generateKeyring(mgrConfig)
 		if err != nil {
 			return errors.Wrapf(err, "failed to generate keyring for %q", resourceName)
 		}
@@ -184,6 +183,13 @@ func (c *Cluster) Start() error {
 
 			if err := updateDeploymentAndWait(c.context, d, c.Namespace, config.MgrType, mgrConfig.DaemonID, c.skipUpgradeChecks, false); err != nil {
 				logger.Errorf("failed to update mgr deployment %q. %v", resourceName, err)
+			}
+		}
+		if existingDeployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(d.GetName(), metav1.GetOptions{}); err != nil {
+			logger.Warningf("failed to find mgr deployment %q for keyring association. %v", resourceName, err)
+		} else {
+			if err = c.associateKeyring(keyring, existingDeployment); err != nil {
+				logger.Warningf("failed to associate keyring with mgr deployment %q. %v", resourceName, err)
 			}
 		}
 	}
@@ -236,9 +242,17 @@ func (c *Cluster) configureModules(daemonIDs []string) {
 	startModuleConfiguration("http bind settings", c.clearHTTPBindFix)
 	startModuleConfiguration("orchestrator modules", c.configureOrchestratorModules)
 	startModuleConfiguration("prometheus", c.enablePrometheusModule)
-	startModuleConfiguration("crash", c.enableCrashModule)
-	startModuleConfiguration("mgr module(s) from the spec", c.configureMgrModules)
 	startModuleConfiguration("dashboard", c.configureDashboardModules)
+	// "crash" is part of the "always_on_modules" list as of Octopus
+	if !c.clusterInfo.CephVersion.IsAtLeastOctopus() {
+		startModuleConfiguration("crash", c.enableCrashModule)
+	} else {
+		// The balancer module must be configured on Octopus
+		// It is a bit confusing but as of Octopus modules that are in the "always_on_modules" list
+		// are "just" enabled, but still they must be configured to work properly
+		startModuleConfiguration("balancer", c.enableBalancerModule)
+	}
+	startModuleConfiguration("mgr module(s) from the spec", c.configureMgrModules)
 }
 
 func startModuleConfiguration(description string, configureModules func() error) {
@@ -268,6 +282,24 @@ func (c *Cluster) enableCrashModule() error {
 	return nil
 }
 
+func (c *Cluster) enableBalancerModule() error {
+	// The order MATTERS, always configure this module first, then turn it on
+
+	// This sets min compat client to luminous and the balancer module mode
+	err := client.ConfigureBalancerModule(c.context, c.Namespace, balancerModuleMode)
+	if err != nil {
+		return errors.Wrapf(err, "failed to configure module %q", balancerModuleName)
+	}
+
+	// This turns "on" the balancer
+	err = client.MgrEnableModule(c.context, c.Namespace, balancerModuleName, false)
+	if err != nil {
+		return errors.Wrapf(err, "failed to turn on mgr %q module", balancerModuleName)
+	}
+
+	return nil
+}
+
 func (c *Cluster) configureMgrModules() error {
 	// Enable mgr modules from the spec
 	for _, module := range c.mgrSpec.Modules {
@@ -284,15 +316,10 @@ func (c *Cluster) configureMgrModules() error {
 
 		if module.Enabled {
 			if module.Name == balancerModuleName {
-				// Set min compat client to luminous before enabling the balancer mode "upmap"
-				err := client.SetMinCompatClientLuminous(c.context, c.Namespace)
+				// Configure balancer module mode
+				err := client.ConfigureBalancerModule(c.context, c.Namespace, balancerModuleMode)
 				if err != nil {
-					return errors.Wrap(err, "failed to set minimum compatibility client")
-				}
-				// Set balancer module mode
-				err = client.MgrSetBalancerMode(c.context, c.Namespace, balancerModuleMode)
-				if err != nil {
-					return errors.Wrapf(err, "failed to set module %q mode to %q", module.Name, balancerModuleMode)
+					return errors.Wrapf(err, "failed to configure module %q", module.Name)
 				}
 			}
 
@@ -301,7 +328,7 @@ func (c *Cluster) configureMgrModules() error {
 			}
 
 			// Configure special settings for individual modules that are enabled
-			if module.Name == pgautoscalerModuleName {
+			if module.Name == PgautoscalerModuleName {
 				monStore := config.GetMonStore(c.context, c.Namespace)
 				// Ceph Octopus will have that option enabled
 				err := monStore.Set("global", "osd_pool_default_pg_autoscale_mode", "on")
@@ -384,4 +411,15 @@ func (c *Cluster) deployPrometheusRule(name, namespace string) error {
 		return errors.Wrapf(err, "prometheus rule could not be deployed")
 	}
 	return nil
+}
+
+// IsModuleInSpec returns whether a module is present in the CephCluster manager spec
+func IsModuleInSpec(modules []cephv1.Module, moduleName string) bool {
+	for _, v := range modules {
+		if v.Name == moduleName {
+			return true
+		}
+	}
+
+	return false
 }

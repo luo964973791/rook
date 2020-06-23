@@ -18,7 +18,6 @@ package csi
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,24 +39,26 @@ import (
 )
 
 type Param struct {
-	CSIPluginImage             string
-	RegistrarImage             string
-	ProvisionerImage           string
-	AttacherImage              string
-	SnapshotterImage           string
-	ResizerImage               string
-	DriverNamePrefix           string
-	EnableSnapshotter          string
-	EnableCSIGRPCMetrics       string
-	KubeletDirPath             string
-	ForceCephFSKernelClient    string
-	CephFSPluginUpdateStrategy string
-	RBDPluginUpdateStrategy    string
-	LogLevel                   uint8
-	CephFSGRPCMetricsPort      uint16
-	CephFSLivenessMetricsPort  uint16
-	RBDGRPCMetricsPort         uint16
-	RBDLivenessMetricsPort     uint16
+	CSIPluginImage               string
+	RegistrarImage               string
+	ProvisionerImage             string
+	AttacherImage                string
+	SnapshotterImage             string
+	ResizerImage                 string
+	DriverNamePrefix             string
+	EnableSnapshotter            string
+	EnableCSIGRPCMetrics         string
+	KubeletDirPath               string
+	ForceCephFSKernelClient      string
+	CephFSPluginUpdateStrategy   string
+	RBDPluginUpdateStrategy      string
+	PluginPriorityClassName      string
+	ProvisionerPriorityClassName string
+	LogLevel                     uint8
+	CephFSGRPCMetricsPort        uint16
+	CephFSLivenessMetricsPort    uint16
+	RBDGRPCMetricsPort           uint16
+	RBDLivenessMetricsPort       uint16
 }
 
 type templateParam struct {
@@ -98,7 +99,7 @@ var (
 // manually challenging.
 var (
 	// image names
-	DefaultCSIPluginImage   = "quay.io/cephcsi/cephcsi:v2.1.0"
+	DefaultCSIPluginImage   = "quay.io/cephcsi/cephcsi:v2.1.2"
 	DefaultRegistrarImage   = "quay.io/k8scsi/csi-node-driver-registrar:v1.2.0"
 	DefaultProvisionerImage = "quay.io/k8scsi/csi-provisioner:v1.4.0"
 	DefaultAttacherImage    = "quay.io/k8scsi/csi-attacher:v2.1.0"
@@ -195,7 +196,7 @@ func ValidateCSIParam() error {
 	return nil
 }
 
-func StartCSIDrivers(namespace string, clientset kubernetes.Interface, ver *version.Info) error {
+func startDrivers(namespace string, clientset kubernetes.Interface, ver *version.Info, ownerRef *metav1.OwnerReference) error {
 	var (
 		err                                                   error
 		rbdPlugin, cephfsPlugin                               *apps.DaemonSet
@@ -204,22 +205,6 @@ func StartCSIDrivers(namespace string, clientset kubernetes.Interface, ver *vers
 		deployProvSTS                                         bool
 		rbdService, cephfsService                             *corev1.Service
 	)
-
-	ownerRef, err := GetDeploymentOwnerReference(clientset, namespace)
-	if err != nil {
-		logger.Warningf("could not find deployment owner reference to assign to csi drivers. %v", err)
-	}
-	if ownerRef != nil {
-		blockOwnerDeletion := false
-		ownerRef.BlockOwnerDeletion = &blockOwnerDeletion
-	}
-
-	// create an empty config map. config map will be filled with data
-	// later when clusters have mons
-	err = CreateCsiConfigMap(namespace, clientset, ownerRef)
-	if err != nil {
-		return errors.Wrapf(err, "failed creating csi config map")
-	}
 
 	tp := templateParam{
 		Param:     CSIParam,
@@ -271,6 +256,19 @@ func StartCSIDrivers(namespace string, clientset kubernetes.Interface, ver *vers
 	}
 	if !strings.EqualFold(enableSnap, "false") {
 		tp.EnableSnapshotter = "true"
+	}
+
+	// default value `system-node-critical` is the highest available priority
+	tp.PluginPriorityClassName, err = k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_PLUGIN_PRIORITY_CLASSNAME", "")
+	if err != nil {
+		return errors.Wrap(err, "failed to load CSI_PLUGIN_PRIORITY_CLASSNAME setting")
+	}
+
+	// default value `system-cluster-critical` is applied for some
+	// critical pods in cluster but less priority than plugin pods
+	tp.ProvisionerPriorityClassName, err = k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_PROVISIONER_PRIORITY_CLASSNAME", "")
+	if err != nil {
+		return errors.Wrap(err, "failed to load CSI_PROVISIONER_PRIORITY_CLASSNAME setting")
 	}
 
 	updateStrategy, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_CEPHFS_PLUGIN_UPDATE_STRATEGY", rollingUpdate)
@@ -509,49 +507,11 @@ func createCSIDriverInfo(clientset kubernetes.Interface, name string, ownerRef *
 	return err
 }
 
-// GetDeploymentOwnerReference returns an OwnerReference to the rook-ceph-operator deployment
-func GetDeploymentOwnerReference(clientset kubernetes.Interface, namespace string) (*metav1.OwnerReference, error) {
-	var deploymentRef *metav1.OwnerReference
-	podName := os.Getenv(k8sutil.PodNameEnvVar)
-	pod, err := clientset.CoreV1().Pods(namespace).Get(podName, metav1.GetOptions{})
-	if err != nil {
-		return nil, errors.Wrapf(err, "could not find pod %q to find deployment owner reference", podName)
-	}
-	for _, podOwner := range pod.OwnerReferences {
-		if podOwner.Kind == "ReplicaSet" {
-			replicaset, err := clientset.AppsV1().ReplicaSets(namespace).Get(podOwner.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil, errors.Wrapf(err, "could not find replicaset %q to find deployment owner reference", podOwner.Name)
-			}
-			for _, replicasetOwner := range replicaset.OwnerReferences {
-				if replicasetOwner.Kind == "Deployment" {
-					deploymentRef = &replicasetOwner
-				}
-			}
-		}
-	}
-	if deploymentRef == nil {
-		return nil, errors.New("could not find owner reference for rook-ceph deployment")
-	}
-	return deploymentRef, nil
-}
-
 // ValidateCSIVersion checks if the configured ceph-csi image is supported
-func ValidateCSIVersion(clientset kubernetes.Interface, namespace, rookImage, serviceAccountName string) error {
+func validateCSIVersion(clientset kubernetes.Interface, namespace, rookImage, serviceAccountName string, ownerRef *metav1.OwnerReference) error {
 	timeout := 15 * time.Minute
 
 	logger.Infof("detecting the ceph csi image version for image %q", CSIParam.CSIPluginImage)
-
-	pod, err := k8sutil.GetRunningPod(clientset)
-	if err != nil {
-		return errors.Wrap(err, "could not get the rook operator pod to obtain the owner reference")
-	}
-	if pod == nil || len(pod.GetOwnerReferences()) == 0 {
-		return errors.New("empty owner reference in rook operator pod")
-	}
-	ownerRef := pod.GetOwnerReferences()[0].DeepCopy()
-
-	*ownerRef.BlockOwnerDeletion = false
 
 	versionReporter, err := cmdreporter.New(
 		clientset,
@@ -578,6 +538,10 @@ func ValidateCSIVersion(clientset kubernetes.Interface, namespace, rookImage, se
 
 	version, err := extractCephCSIVersion(stdout)
 	if err != nil {
+		if AllowUnsupported {
+			logger.Infof("failed to extract csi version, but continuing since unsupported versions are allowed. %v", err)
+			return nil
+		}
 		return errors.Wrap(err, "failed to extract ceph CSI version")
 	}
 	logger.Infof("Detected ceph CSI image version: %q", version)

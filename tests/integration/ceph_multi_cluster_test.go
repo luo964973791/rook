@@ -135,7 +135,7 @@ func NewMCTestOperations(t func() *testing.T, namespace1 string, namespace2 stri
 	checkIfShouldRunForMinimalTestMatrix(t, kh, multiClusterMinimalTestVersion)
 
 	cleanupHost := false
-	i := installer.NewCephInstaller(t, kh.Clientset, false, "", installer.VersionMaster, installer.NautilusVersion, cleanupHost)
+	i := installer.NewCephInstaller(t, kh.Clientset, false, installer.VersionMaster, installer.NautilusVersion, cleanupHost)
 
 	op := &MCTestOperations{i, kh, t, namespace1, namespace2, installer.SystemNamespace(namespace1), "", false}
 	p := kh.IsStorageClassPresent("manual")
@@ -184,7 +184,7 @@ func (o MCTestOperations) Teardown() {
 func (o MCTestOperations) startCluster(namespace, store string) error {
 	logger.Infof("starting cluster %s", namespace)
 	err := o.installer.CreateRookCluster(namespace, o.systemNamespace, store, o.testOverPVC, o.storageClassName,
-		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, installer.NautilusVersion)
+		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, 1, installer.NautilusVersion)
 	if err != nil {
 		o.T().Fail()
 		o.installer.GatherAllRookLogs(o.T().Name(), namespace, o.systemNamespace)

@@ -18,16 +18,13 @@ limitations under the License.
 package config
 
 import (
-	"context"
 	"time"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	v1 "k8s.io/api/core/v1"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 var (
@@ -36,8 +33,8 @@ var (
 )
 
 // ConditionExport function will export each condition into the cluster custom resource
-func ConditionExport(context *clusterd.Context, namespaceName types.NamespacedName, conditionType cephv1.ConditionType, status v1.ConditionStatus, reason, message string) {
-	setCondition(context, namespaceName, cephv1.Condition{
+func ConditionExport(context *clusterd.Context, namespace, name string, conditionType cephv1.ConditionType, status v1.ConditionStatus, reason, message string) {
+	setCondition(context, namespace, name, cephv1.Condition{
 		Type:    conditionType,
 		Status:  status,
 		Reason:  reason,
@@ -46,18 +43,11 @@ func ConditionExport(context *clusterd.Context, namespaceName types.NamespacedNa
 }
 
 // setCondition updates the conditions of the cluster custom resource
-func setCondition(c *clusterd.Context, namespaceName types.NamespacedName, newCondition cephv1.Condition) {
-	cluster := &cephv1.CephCluster{}
-	err := c.Client.Get(context.TODO(), namespaceName, cluster)
+func setCondition(context *clusterd.Context, namespace, name string, newCondition cephv1.Condition) {
+	cluster, err := context.RookClientset.CephV1().CephClusters(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
-		if kerrors.IsNotFound(err) {
-			logger.Errorf("no CephCluster could not be found. %+v", err)
-			return
-		}
-		logger.Errorf("failed to get CephCluster object. %+v", err)
-		return
+		logger.Errorf("failed to get cluster %v", err)
 	}
-
 	if conditions == nil {
 		conditions = &cluster.Status.Conditions
 		if cluster.Status.Conditions != nil {
@@ -86,15 +76,14 @@ func setCondition(c *clusterd.Context, namespaceName types.NamespacedName, newCo
 			cluster.Status.State = state
 		}
 		cluster.Status.Message = newCondition.Message
-		logger.Infof("CephCluster %q status: %q. %q", namespaceName.Namespace, cluster.Status.Phase, cluster.Status.Message)
+		logger.Infof("CephCluster %q status: %q. %q", namespace, cluster.Status.Phase, cluster.Status.Message)
 	}
 
-	err = c.Client.Update(context.TODO(), cluster)
-	if err != nil {
-		logger.Errorf("failed to update cluster condition to %+v. %v", newCondition, err)
+	if _, err := context.RookClientset.CephV1().CephClusters(namespace).Update(cluster); err != nil {
+		logger.Errorf("failed to update cluster condition %v", err)
 	}
 	if newCondition.Type == cephv1.ConditionReady {
-		checkConditionFalse(c, namespaceName)
+		checkConditionFalse(context, namespace, name)
 	}
 }
 
@@ -129,7 +118,7 @@ func translatePhasetoState(phase cephv1.ConditionType) cephv1.ClusterState {
 }
 
 // Updating the status of Progressing, Updating or Upgrading to False once cluster is Ready
-func checkConditionFalse(context *clusterd.Context, namespaceName types.NamespacedName) {
+func checkConditionFalse(context *clusterd.Context, namespace, name string) {
 	tempConditionList := []cephv1.ConditionType{cephv1.ConditionUpdating, cephv1.ConditionUpgrading, cephv1.ConditionProgressing}
 	var tempCondition cephv1.ConditionType
 	for _, conditionType := range tempConditionList {
@@ -149,24 +138,24 @@ func checkConditionFalse(context *clusterd.Context, namespaceName types.Namespac
 		reason = "ProgressingCompleted"
 		message = "Cluster progression is completed"
 	}
-	ConditionExport(context, namespaceName, tempCondition, v1.ConditionFalse, reason, message)
+	ConditionExport(context, namespace, name, tempCondition, v1.ConditionFalse, reason, message)
 }
 
 // ConditionInitialize initializes some of the conditions at the beginning of cluster creation
-func ConditionInitialize(context *clusterd.Context, namespaceName types.NamespacedName) {
-	setCondition(context, namespaceName, cephv1.Condition{
+func ConditionInitialize(context *clusterd.Context, namespace, name string) {
+	setCondition(context, namespace, name, cephv1.Condition{
 		Type:    cephv1.ConditionFailure,
 		Status:  v1.ConditionFalse,
 		Reason:  "",
 		Message: "",
 	})
-	setCondition(context, namespaceName, cephv1.Condition{
+	setCondition(context, namespace, name, cephv1.Condition{
 		Type:    cephv1.ConditionIgnored,
 		Status:  v1.ConditionFalse,
 		Reason:  "",
 		Message: "",
 	})
-	setCondition(context, namespaceName, cephv1.Condition{
+	setCondition(context, namespace, name, cephv1.Condition{
 		Type:    cephv1.ConditionUpgrading,
 		Status:  v1.ConditionFalse,
 		Reason:  "",
@@ -183,9 +172,8 @@ func conditionMapping(conditions []cephv1.Condition) {
 }
 
 // CheckConditionReady checks whether the cluster is Ready and returns the message for the Progressing ConditionType
-func CheckConditionReady(c *clusterd.Context, namespaceName types.NamespacedName) string {
-	cluster := &cephv1.CephCluster{}
-	err := c.Client.Get(context.TODO(), namespaceName, cluster)
+func CheckConditionReady(context *clusterd.Context, namespace, name string) string {
+	cluster, err := context.RookClientset.CephV1().CephClusters(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		logger.Errorf("failed to get cluster %v", err)
 	}

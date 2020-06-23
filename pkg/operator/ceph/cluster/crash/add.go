@@ -46,24 +46,17 @@ const (
 
 // Add adds a new Controller based on nodedrain.ReconcileNode and registers the relevant watches and handlers
 func Add(mgr manager.Manager, context *clusterd.Context) error {
-	return add(mgr, newReconciler(mgr, context))
-}
-
-// newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Reconciler {
-	return &ReconcileNode{
+	reconcileNode := &ReconcileNode{
 		client: mgr.GetClient(),
 		scheme: mgr.GetScheme(),
 	}
-}
+	reconciler := reconcile.Reconciler(reconcileNode)
 
-func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New(controllerName, mgr, controller.Options{Reconciler: r})
+	c, err := controller.New(controllerName, mgr, controller.Options{Reconciler: reconciler})
 	if err != nil {
 		return errors.Wrapf(err, "failed to create a new %q", controllerName)
 	}
-	logger.Info("successfully started")
 
 	// Watch for changes to the nodes
 	specChangePredicate := predicate.Funcs{
@@ -82,7 +75,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	logger.Debugf("watch for changes to the nodes")
 	err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &handler.EnqueueRequestForObject{}, specChangePredicate)
 	if err != nil {
-		return errors.Wrap(err, "failed to watch for node changes")
+		return errors.Wrapf(err, "failed to watch for node changes")
 	}
 
 	// Watch for changes to the ceph-crash deployments
@@ -110,7 +103,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		},
 	)
 	if err != nil {
-		return errors.Wrap(err, "failed to watch for changes on the ceph-crash deployment")
+		return errors.Wrapf(err, "failed to watch for changes on the ceph-crash deployment")
 	}
 
 	// Watch for changes to the ceph pod nodename and enqueue their nodes

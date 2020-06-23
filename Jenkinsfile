@@ -37,19 +37,45 @@ pipeline {
                         env.testArgs = "min-test-matrix"
                     }
 
+                    // Get changed files
+                    def json_changed_files = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${env.CHANGE_ID}/files", returnStdout: true).trim()
+                    def list = new groovy.json.JsonSlurper().parseText(json_changed_files)
+                    def changed_files = list.filename.join(",")
+                     echo ("changed files are: ${changed_files}")
+
+                    // Get PR title
+                    def title = evaluateJson(json,'${json.title}')
+
                     // extract which specific storage provider to test
-                    if (body.contains("[test cassandra]")) {
+                    if (body.contains("[test cassandra]") || title.contains("cassandra:")) {
                         env.testProvider = "cassandra"
-                    } else if (body.contains("[test ceph]")) {
+                    } else if (body.contains("[test ceph]") || title.contains("ceph:")) {
                         env.testProvider = "ceph"
-                    } else if (body.contains("[test cockroachdb]")) {
+                    } else if (body.contains("[test cockroachdb]") || title.contains("cockroachdb:")) {
                         env.testProvider = "cockroachdb"
-                    } else if (body.contains("[test edgefs]")) {
+                    } else if (body.contains("[test edgefs]") || title.contains("edgefs:")) {
                         env.testProvider = "edgefs"
-                    } else if (body.contains("[test nfs]")) {
+                    } else if (body.contains("[test nfs]") || title.contains("nfs:")) {
                         env.testProvider = "nfs"
-                    } else if (body.contains("[test yugabytedb]")) {
+                    } else if (body.contains("[test yugabytedb]") || title.contains("yugabytedb:")) {
                         env.testProvider = "yugabytedb"
+                    } else if (body.contains("[test]")) {
+                        env.shouldBuild = "true"
+                    } else if (!changed_files.contains(".go")) {
+                        echo ("No golang changes detected! Looking for .md, .yaml and .txt now.")
+                        if (changed_files.contains(".md")) {
+                            echo ("Documentation changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        } else if (changed_files.contains(".yaml")) {
+                            echo ("YAML changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        } else if (changed_files.contains(".txt")) {
+                            echo ("Text changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        }
+                    } else if (!changed_files.contains(".go")) {
+                        echo ("No code changes detected! Just building.")
+                        env.shouldTest = "false"
                     }
                     echo ("integration test provider: ${env.testProvider}")
                 }
@@ -116,6 +142,8 @@ pipeline {
                 stash name: 'repo-amd64',includes: 'ceph-amd64.tar,cockroachdb-amd64.tar,cassandra-amd64.tar,nfs-amd64.tar,yugabytedb-amd64.tar,build/common.sh,_output/tests/linux_amd64/,_output/charts/,tests/scripts/'
                 script{
                     def data = [
+                        "aws_1.11.x": "v1.11.10",
+                        "aws_1.13.x": "v1.13.12",
                         "aws_1.14.x": "v1.14.10",
                         "aws_1.15.x": "v1.15.11",
                         "aws_1.16.x": "v1.16.8",
@@ -190,22 +218,17 @@ def RunIntegrationTest(k, v) {
                     sh '''#!/bin/bash
                           export KUBECONFIG=$HOME/admin.conf
                           tests/scripts/helm.sh up
-                          tests/scripts/localPathPV.sh /dev/xvdc'''
+                          tests/scripts/localPathPV.sh'''
                     try{
                         echo "Running full regression"
                         sh '''#!/bin/bash
                               set -o pipefail
                               export PATH="/tmp/rook-tests-scripts-helm/linux-amd64:$PATH" \
                                   KUBECONFIG=$HOME/admin.conf \
-                                  TEST_HELM_PATH=/tmp/rook-tests-scripts-helm/linux-amd64/helm \
-                                  TEST_ENV_NAME='''+"${k}"+''' \
-                                  TEST_BASE_DIR="WORKING_DIR" \
-                                  TEST_LOG_COLLECTION_LEVEL='''+"${env.getLogs}"+''' \
                                   STORAGE_PROVIDER_TESTS='''+"${env.testProvider}"+''' \
-                                  TEST_ARGUMENTS='''+"${env.testArgs}"+''' \
-                                  TEST_SCRATCH_DEVICE=/dev/xvdc
+                                  TEST_ARGUMENTS='''+"${env.testArgs}"+'''
                               kubectl config view
-                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s 2>&1 | tee _output/tests/integrationTests.log'''
+                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s --base_test_dir "" --host_type '''+"${k}"+''' --logs '''+"${env.getLogs}"+''' --helm /tmp/rook-tests-scripts-helm/linux-amd64/helm 2>&1 | tee _output/tests/integrationTests.log'''
                     }
                     finally{
                         sh "journalctl -u kubelet > _output/tests/kubelet_${v}.log"

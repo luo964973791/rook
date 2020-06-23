@@ -33,3 +33,13 @@ func GetMonPlacement(p rookv1.PlacementSpec) rookv1.Placement {
 func GetOSDPlacement(p rookv1.PlacementSpec) rookv1.Placement {
 	return p.All().Merge(p[KeyOSD])
 }
+
+// GetRBDMirrorPlacement returns the placement for the RBD mirrors
+func GetRBDMirrorPlacement(p rookv1.PlacementSpec) rookv1.Placement {
+	return p.All().Merge(p[KeyRBDMirror])
+}
+
+// GetCleanupPlacement returns the placement the cleanup job
+func GetCleanupPlacement(p rookv1.PlacementSpec) rookv1.Placement {
+	return p.All().Merge(p[KeyCleanup])
+}
