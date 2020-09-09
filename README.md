@@ -34,3 +34,8 @@ admin
 kubectl -n rook-ceph get secret rook-ceph-dashboard-password -o jsonpath="{['data']['password']}" | base64 --decode && echo
 ```
 
+### 格式化ceph挂载盘
+```javascript
+sgdisk --zap-all /dev/sdb
+```
+
