@@ -36,6 +36,7 @@ kubectl -n rook-ceph get secret rook-ceph-dashboard-password -o jsonpath="{['dat
 
 ### 格式化ceph挂载盘
 ```javascript
+yum install gdisk -y
 sgdisk --zap-all /dev/sdb
 ```
 
