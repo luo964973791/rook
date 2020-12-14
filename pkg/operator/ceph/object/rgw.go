@@ -18,6 +18,7 @@ limitations under the License.
 package object
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 
@@ -26,7 +27,6 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
@@ -40,22 +40,23 @@ import (
 )
 
 type clusterConfig struct {
-	clusterInfo       *cephconfig.ClusterInfo
-	context           *clusterd.Context
-	store             *cephv1.CephObjectStore
-	rookVersion       string
-	clusterSpec       *cephv1.ClusterSpec
-	ownerRef          *metav1.OwnerReference
-	DataPathMap       *config.DataPathMap
-	skipUpgradeChecks bool
-	client            client.Client
-	scheme            *runtime.Scheme
-	Network           cephv1.NetworkSpec
+	context     *clusterd.Context
+	clusterInfo *cephclient.ClusterInfo
+	store       *cephv1.CephObjectStore
+	rookVersion string
+	clusterSpec *cephv1.ClusterSpec
+	ownerRef    *metav1.OwnerReference
+	DataPathMap *config.DataPathMap
+	client      client.Client
+	scheme      *runtime.Scheme
 }
 
 type rgwConfig struct {
 	ResourceName string
 	DaemonID     string
+	Realm        string
+	ZoneGroup    string
+	Zone         string
 }
 
 const (
@@ -64,28 +65,29 @@ const (
 
 var updateDeploymentAndWait = mon.UpdateCephDeploymentAndWait
 
-func (c *clusterConfig) createOrUpdateStore() error {
+func (c *clusterConfig) createOrUpdateStore(realmName, zoneGroupName, zoneName string) error {
 	logger.Infof("creating object store %q in namespace %q", c.store.Name, c.store.Namespace)
 
-	if err := c.startRGWPods(); err != nil {
-		return errors.Wrapf(err, "failed to start rgw pods")
+	if err := c.startRGWPods(realmName, zoneGroupName, zoneName); err != nil {
+		return errors.Wrap(err, "failed to start rgw pods")
+	}
+
+	objContext := NewContext(c.context, c.clusterInfo, c.store.Namespace)
+	err := enableRGWDashboard(objContext)
+	if err != nil {
+		logger.Warningf("failed to enable dashboard for rgw. %v", err)
 	}
 
 	logger.Infof("created object store %q in namespace %q", c.store.Name, c.store.Namespace)
 	return nil
 }
 
-func (c *clusterConfig) startRGWPods() error {
+func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) error {
+	ctx := context.TODO()
 	// backward compatibility, triggered during updates
-	if c.store.Spec.Gateway.AllNodes {
-		// log we don't support that anymore
-		logger.Warningf(
-			"setting 'AllNodes' to %t is not supported anymore, please use 'instances' instead, removing old DaemonSets if any and replace them with Deployments in object store %s",
-			c.store.Spec.Gateway.AllNodes, c.store.Name)
-	}
 	if c.store.Spec.Gateway.Instances < 1 {
 		// Set the minimum of at least one instance
-		logger.Warningf("spec.gateway.instances must be set to at least 1")
+		logger.Warning("spec.gateway.instances must be set to at least 1")
 		c.store.Spec.Gateway.Instances = 1
 	}
 
@@ -111,6 +113,9 @@ func (c *clusterConfig) startRGWPods() error {
 		rgwConfig := &rgwConfig{
 			ResourceName: resourceName,
 			DaemonID:     daemonName,
+			Realm:        realmName,
+			ZoneGroup:    zoneGroupName,
+			Zone:         zoneName,
 		}
 
 		// We set the owner reference of the Secret to the Object controller instead of the replicaset
@@ -121,7 +126,7 @@ func (c *clusterConfig) startRGWPods() error {
 		}
 
 		// Check for existing deployment and set the daemon config flags
-		_, err = c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Get(rgwConfig.ResourceName, metav1.GetOptions{})
+		_, err = c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Get(ctx, rgwConfig.ResourceName, metav1.GetOptions{})
 		// We don't need to handle any error here
 		if err != nil {
 			// Apply the flag only when the deployment is not found
@@ -135,7 +140,10 @@ func (c *clusterConfig) startRGWPods() error {
 		}
 
 		// Create deployment
-		deployment := c.createDeployment(rgwConfig)
+		deployment, err := c.createDeployment(rgwConfig)
+		if err != nil {
+			return nil
+		}
 		logger.Infof("object store %q deployment %q started", c.store.Name, deployment.Name)
 
 		// Set owner ref to cephObjectStore object
@@ -150,25 +158,18 @@ func (c *clusterConfig) startRGWPods() error {
 			return errors.Wrapf(err, "failed to set annotation for deployment %q", deployment.Name)
 		}
 
-		_, createErr := c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Create(deployment)
+		_, createErr := c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
 		if createErr != nil {
 			if !kerrors.IsAlreadyExists(createErr) {
-				return errors.Wrapf(createErr, "failed to create rgw deployment")
+				return errors.Wrap(createErr, "failed to create rgw deployment")
 			}
 			logger.Infof("object store %q deployment %q already exists. updating if needed", c.store.Name, deployment.Name)
-			_, err = c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Get(deployment.Name, metav1.GetOptions{})
-			if err != nil {
-				return errors.Wrapf(err, "failed to get existing rgw deployment %q for update", deployment.Name)
-			}
-		}
-
-		// Generate the mime.types file after the rep. controller as well for the same reason as keyring
-		if createErr != nil && kerrors.IsAlreadyExists(createErr) {
-			if err := updateDeploymentAndWait(c.context, deployment, c.store.Namespace, config.RgwType, daemonLetterID, c.skipUpgradeChecks, c.clusterSpec.ContinueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
+			if err := updateDeploymentAndWait(c.context, c.clusterInfo, deployment, config.RgwType, daemonLetterID, c.clusterSpec.SkipUpgradeChecks, c.clusterSpec.ContinueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
 				return errors.Wrapf(err, "failed to update object store %q deployment %q", c.store.Name, deployment.Name)
 			}
 		}
 
+		// Generate the mime.types file after the rep. controller as well for the same reason as keyring
 		if err := c.generateMimeTypes(); err != nil {
 			return errors.Wrap(err, "failed to generate the rgw mime.types config")
 		}
@@ -177,7 +178,7 @@ func (c *clusterConfig) startRGWPods() error {
 	// scale down scenario
 	deps, err := k8sutil.GetDeployments(c.context.Clientset, c.store.Namespace, c.storeLabelSelector())
 	if err != nil {
-		logger.Warning("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
+		logger.Warningf("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
 	}
 
 	currentRgwInstances := int(len(deps.Items))
@@ -195,7 +196,7 @@ func (c *clusterConfig) startRGWPods() error {
 
 			// Delete the Secret key
 			secretToRemove := c.generateSecretName(k8sutil.IndexToName(depIDToRemove))
-			err = c.context.Clientset.CoreV1().Secrets(c.store.Namespace).Delete(secretToRemove, &metav1.DeleteOptions{})
+			err = c.context.Clientset.CoreV1().Secrets(c.store.Namespace).Delete(ctx, secretToRemove, metav1.DeleteOptions{})
 			if err != nil && !kerrors.IsNotFound(err) {
 				logger.Warningf("failed to delete rgw secret %q. %v", secretToRemove, err)
 			}
@@ -208,7 +209,7 @@ func (c *clusterConfig) startRGWPods() error {
 		// verify scale down was successful
 		deps, err = k8sutil.GetDeployments(c.context.Clientset, c.store.Namespace, c.storeLabelSelector())
 		if err != nil {
-			logger.Warning("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
+			logger.Warningf("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
 		}
 		currentRgwInstances = len(deps.Items)
 		if currentRgwInstances == desiredRgwInstances {
@@ -236,7 +237,7 @@ func (c *clusterConfig) deleteLegacyDaemons() {
 			}
 		}
 		// Delete legacy rgw key
-		err = cephclient.AuthDelete(c.context, c.store.Namespace, oldRgwKeyName)
+		err = cephclient.AuthDelete(c.context, c.clusterInfo, oldRgwKeyName)
 		if err != nil {
 			logger.Infof("failed to delete legacy rgw key %q. %v", oldRgwKeyName, err)
 		}
@@ -246,7 +247,7 @@ func (c *clusterConfig) deleteLegacyDaemons() {
 	logger.Debugf("looking for legacy deployment in object store %q", c.store.Name)
 	deps, err := k8sutil.GetDeployments(c.context.Clientset, c.store.Namespace, c.storeLabelSelector())
 	if err != nil {
-		logger.Warning("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
+		logger.Warningf("could not get deployments for object store %q (matching label selector %q). %v", c.store.Name, c.storeLabelSelector(), err)
 	}
 	for _, d := range deps.Items {
 		if d.Name == instanceName(c.store.Name) {
@@ -255,7 +256,7 @@ func (c *clusterConfig) deleteLegacyDaemons() {
 				logger.Warningf("error during deletion of deployment %q resource. %v", d.Name, err)
 			}
 			// Delete legacy rgw key
-			err = cephclient.AuthDelete(c.context, c.store.Namespace, oldRgwKeyName)
+			err = cephclient.AuthDelete(c.context, c.clusterInfo, oldRgwKeyName)
 			if err != nil {
 				logger.Infof("failed to delete legacy rgw key %q. %v", oldRgwKeyName, err)
 			}
@@ -268,25 +269,38 @@ func (c *clusterConfig) deleteLegacyDaemons() {
 func (c *clusterConfig) deleteStore() error {
 	logger.Infof("deleting object store %q from namespace %q", c.store.Name, c.store.Namespace)
 
-	// Delete rgw CephX keys and configuration in centralized mon database
-	for i := 0; i < int(c.store.Spec.Gateway.Instances); i++ {
-		daemonLetterID := k8sutil.IndexToName(i)
-		depNameToRemove := fmt.Sprintf("%s-%s-%s", AppName, c.store.Name, daemonLetterID)
+	if !c.clusterSpec.External.Enable {
+		// Delete rgw CephX keys and configuration in centralized mon database
+		for i := 0; i < int(c.store.Spec.Gateway.Instances); i++ {
+			daemonLetterID := k8sutil.IndexToName(i)
+			depNameToRemove := fmt.Sprintf("%s-%s-%s", AppName, c.store.Name, daemonLetterID)
 
-		err := c.deleteRgwCephObjects(depNameToRemove)
+			err := c.deleteRgwCephObjects(depNameToRemove)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Delete the realm and pools
+		objContext, err := NewMultisiteContext(c.context, c.clusterInfo, c.store)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "failed to set multisite on object store %q", c.store.Name)
+		}
+
+		objContext.Endpoint = c.store.Status.Info["endpoint"]
+
+		err = disableRGWDashboard(objContext)
+		if err != nil {
+			logger.Warningf("failed to disable dashboard for rgw. %v", err)
+		}
+
+		err = deleteRealmAndPools(objContext, c.store.Spec)
+		if err != nil {
+			return errors.Wrap(err, "failed to delete the realm and pools")
 		}
 	}
 
-	// Delete the realm and pools
-	objContext := NewContext(c.context, c.store.Name, c.store.Namespace)
-	err := deleteRealmAndPools(objContext, c.store.Spec)
-	if err != nil {
-		return errors.Wrap(err, "failed to delete the realm and pools")
-	}
-
-	logger.Infof("completed deleting object store %q from namespace %q", c.store.Name, c.store.Namespace)
+	logger.Infof("successfully deleted object store %q from namespace %q", c.store.Name, c.store.Namespace)
 	return nil
 }
 
@@ -299,7 +313,7 @@ func (c *clusterConfig) deleteRgwCephObjects(depNameToRemove string) error {
 		return err
 	}
 
-	err = cephclient.AuthDelete(c.context, c.store.Namespace, generateCephXUser(depNameToRemove))
+	err = cephclient.AuthDelete(c.context, c.clusterInfo, generateCephXUser(depNameToRemove))
 	if err != nil {
 		return err
 	}
@@ -317,7 +331,7 @@ func (c *clusterConfig) storeLabelSelector() string {
 }
 
 // Validate the object store arguments
-func validateStore(context *clusterd.Context, s *cephv1.CephObjectStore) error {
+func (r *ReconcileCephObjectStore) validateStore(s *cephv1.CephObjectStore) error {
 	if s.Name == "" {
 		return errors.New("missing name")
 	}
@@ -332,13 +346,20 @@ func validateStore(context *clusterd.Context, s *cephv1.CephObjectStore) error {
 	// Validate the pool settings, but allow for empty pools specs in case they have already been created
 	// such as by the ceph mgr
 	if !emptyPool(s.Spec.MetadataPool) {
-		if err := pool.ValidatePoolSpec(context, s.Namespace, &s.Spec.MetadataPool); err != nil {
+		if err := pool.ValidatePoolSpec(r.context, r.clusterInfo, r.clusterSpec, &s.Spec.MetadataPool); err != nil {
 			return errors.Wrap(err, "invalid metadata pool spec")
 		}
 	}
 	if !emptyPool(s.Spec.DataPool) {
-		if err := pool.ValidatePoolSpec(context, s.Namespace, &s.Spec.DataPool); err != nil {
+		if err := pool.ValidatePoolSpec(r.context, r.clusterInfo, r.clusterSpec, &s.Spec.DataPool); err != nil {
 			return errors.Wrap(err, "invalid data pool spec")
+		}
+	}
+
+	// Fail if we detected an external CephCluster CR and the list of endpoints is empty
+	if r.clusterSpec.External.Enable && r.clusterInfo.CephCred.Username != cephclient.AdminUsername {
+		if len(s.Spec.Gateway.ExternalRgwEndpoints) == 0 {
+			return errors.New("ceph cluster is external but externalRgwEndpoints list is empty")
 		}
 	}
 
@@ -351,4 +372,18 @@ func (c *clusterConfig) generateSecretName(id string) string {
 
 func emptyPool(pool cephv1.PoolSpec) bool {
 	return reflect.DeepEqual(pool, cephv1.PoolSpec{})
+}
+
+// BuildDomainName build the dns name to reach out the service endpoint
+func BuildDomainName(name, namespace string) string {
+	return fmt.Sprintf("%s-%s.%s.%s", AppName, name, namespace, svcDNSSuffix)
+}
+
+// buildDNSEndpoint build the dns name to reach out the service endpoint
+func buildDNSEndpoint(domainName string, port int32, secure bool) string {
+	httpPrefix := "http"
+	if secure {
+		httpPrefix = "https"
+	}
+	return fmt.Sprintf("%s://%s:%d", httpPrefix, domainName, port)
 }

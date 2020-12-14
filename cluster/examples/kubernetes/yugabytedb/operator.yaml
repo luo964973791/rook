@@ -17,7 +17,7 @@ spec:
   scope: Namespaced
   version: v1alpha1
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-yugabytedb-operator
@@ -66,7 +66,7 @@ metadata:
   name: rook-yugabytedb-operator
   namespace: rook-yugabytedb-system
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: rook-yugabytedb-operator
@@ -99,7 +99,7 @@ spec:
       serviceAccountName: rook-yugabytedb-operator
       containers:
       - name: rook-yugabytedb-operator
-        image: rook/yugabytedb:v1.3.6
+        image: rook/yugabytedb:v1.5.3
         args: ["yugabytedb", "operator"]
         env:
         - name: POD_NAME

@@ -8,6 +8,7 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '200'))
         timeout(time: 2, unit: 'HOURS')
         timestamps()
     }
@@ -17,19 +18,26 @@ pipeline {
             when { branch "PR-*" }
             steps {
                 script {
-                    pr_number = sh (script: "echo ${env.BRANCH_NAME} | grep -o -E '[0-9]+' ",returnStdout: true)
-                    def json = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${pr_number}", returnStdout: true).trim()
+                    def json = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${env.CHANGE_ID}", returnStdout: true).trim()
+                    def draft = evaluateJson(json,'${json.draft}')
+                    if (draft.contains("true")) {
+                        echo ("This is a draft PR. Aborting")
+                        env.shouldBuild = "false"
+                    }
                     def body = evaluateJson(json,'${json.body}')
                     if (body.contains("[skip ci]")) {
-                         echo ("'[skip ci]' spotted in PR body text. Aborting.")
-                         env.shouldBuild = "false"
+                        echo ("'[skip ci]' spotted in PR body text. Aborting.")
+                        env.shouldBuild = "false"
                     }
                     if (body.contains("[skip tests]")) {
-                         env.shouldTest = "false"
+                        env.shouldTest = "false"
                     }
                     if (body.contains("[all logs]")) {
-                          env.getLogs = "all"
+                        env.getLogs = "all"
                     }
+
+                    // When running in a PR we assuming it's not an official build
+                    env.isOfficialBuild = "false"
 
                     if (!body.contains("[test full]")) {
                         // By default run the min test matrix (all tests run, but will be distributed on different versions of K8s).
@@ -77,6 +85,7 @@ pipeline {
                         echo ("No code changes detected! Just building.")
                         env.shouldTest = "false"
                     }
+
                     echo ("integration test provider: ${env.testProvider}")
                 }
             }
@@ -88,18 +97,21 @@ pipeline {
                 }
             }
             steps {
-                // quick check that no files are modified for the go modules
-                sh 'build/run make -j\$(nproc) mod.check'
-                sh 'git diff-index --quiet HEAD || { echo "CHANGES FOUND. You may need to run make clean"; git status -s; exit 1; }'
                 // run the build
-                sh 'build/run make -j\$(nproc) build.all'
+                script {
+                    if (env.isOfficialBuild == "false") {
+                        sh (script: "build/run make -j\$(nproc) build", returnStdout: true)
+                    } else {
+                        sh (script: "build/run make -j\$(nproc) build.all", returnStdout: true)
+                    }
+                }
                 sh 'git status'
             }
         }
-        stage('Unit Tests') {
+        stage('Unit Tests for Release Builds') {
             when {
                 expression {
-                    return env.shouldBuild != "false"
+                    return env.shouldBuild != "false" && env.isOfficialBuild != "false"
                 }
             }
             steps {
@@ -137,18 +149,17 @@ pipeline {
                     return env.shouldBuild != "false" && env.shouldTest != "false" && !params.skipIntegrationTests
                 }
             }
-            steps{
+            steps {
                 sh 'cat _output/version | xargs tests/scripts/makeTestImages.sh  save amd64'
-                stash name: 'repo-amd64',includes: 'ceph-amd64.tar,cockroachdb-amd64.tar,cassandra-amd64.tar,nfs-amd64.tar,yugabytedb-amd64.tar,build/common.sh,_output/tests/linux_amd64/,_output/charts/,tests/scripts/'
-                script{
+                stash name: 'repo-amd64',includes: 'ceph-amd64.tar,cockroachdb-amd64.tar,cassandra-amd64.tar,nfs-amd64.tar,yugabytedb-amd64.tar,build/common.sh,_output/tests/linux_amd64/,_output/charts/,tests/scripts/,cluster/charts/'
+                script {
                     def data = [
                         "aws_1.11.x": "v1.11.10",
                         "aws_1.13.x": "v1.13.12",
-                        "aws_1.14.x": "v1.14.10",
-                        "aws_1.15.x": "v1.15.11",
-                        "aws_1.16.x": "v1.16.8",
-                        "aws_1.17.x": "v1.17.4",
-                        "aws_1.18.x": "v1.18.0"
+                        "aws_1.15.x": "v1.15.12",
+                        "aws_1.17.x": "v1.17.13",
+                        "aws_1.18.x": "v1.18.10",
+                        "aws_1.19.x": "v1.19.3"
                     ]
                     testruns = [:]
                     for (kv in mapToList(data)) {
@@ -217,18 +228,21 @@ def RunIntegrationTest(k, v) {
                     sh "tests/scripts/kubeadm.sh up"
                     sh '''#!/bin/bash
                           export KUBECONFIG=$HOME/admin.conf
-                          tests/scripts/helm.sh up
-                          tests/scripts/localPathPV.sh'''
+                          tests/scripts/helm.sh up'''
                     try{
                         echo "Running full regression"
                         sh '''#!/bin/bash
                               set -o pipefail
-                              export PATH="/tmp/rook-tests-scripts-helm/linux-amd64:$PATH" \
-                                  KUBECONFIG=$HOME/admin.conf \
+                              export KUBECONFIG=$HOME/admin.conf \
+                                  TEST_ENV_NAME='''+"${k}"+''' \
+                                  TEST_BASE_DIR="WORKING_DIR" \
+                                  TEST_LOG_COLLECTION_LEVEL='''+"${env.getLogs}"+''' \
                                   STORAGE_PROVIDER_TESTS='''+"${env.testProvider}"+''' \
-                                  TEST_ARGUMENTS='''+"${env.testArgs}"+'''
+                                  TEST_ARGUMENTS='''+"${env.testArgs}"+''' \
+                                  TEST_IS_OFFICIAL_BUILD='''+"${env.isOfficialBuild}"+''' \
+                                  TEST_SCRATCH_DEVICE=/dev/nvme0n1
                               kubectl config view
-                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s --base_test_dir "" --host_type '''+"${k}"+''' --logs '''+"${env.getLogs}"+''' --helm /tmp/rook-tests-scripts-helm/linux-amd64/helm 2>&1 | tee _output/tests/integrationTests.log'''
+                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s 2>&1 | tee _output/tests/integrationTests.log'''
                     }
                     finally{
                         sh "journalctl -u kubelet > _output/tests/kubelet_${v}.log"

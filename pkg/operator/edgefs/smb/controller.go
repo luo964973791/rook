@@ -18,6 +18,7 @@ limitations under the License.
 package smb
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 
@@ -57,7 +58,6 @@ type SMBController struct {
 	NetworkSpec      rookv1.NetworkSpec
 	dataDirHostPath  string
 	dataVolumeSize   resource.Quantity
-	annotations      rookv1.Annotations
 	placement        rookv1.Placement
 	resources        v1.ResourceRequirements
 	resourceProfile  string
@@ -155,6 +155,7 @@ func (c *SMBController) onDelete(obj interface{}) {
 	}
 }
 func (c *SMBController) ParentClusterChanged(cluster edgefsv1.ClusterSpec) {
+	ctx := context.TODO()
 	if c.rookImage == cluster.EdgefsImageName {
 		logger.Infof("No need to update the smb service, the same images present")
 		return
@@ -163,7 +164,7 @@ func (c *SMBController) ParentClusterChanged(cluster edgefsv1.ClusterSpec) {
 	// update controller options by updated cluster spec
 	c.rookImage = cluster.EdgefsImageName
 
-	smbes, err := c.context.RookClientset.EdgefsV1().SMBs(c.namespace).List(metav1.ListOptions{})
+	smbes, err := c.context.RookClientset.EdgefsV1().SMBs(c.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logger.Errorf("failed to retrieve SMBes to update the Edgefs version. %+v", err)
 		return

@@ -17,6 +17,7 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
@@ -29,22 +30,13 @@ import (
 	"github.com/rook/rook/pkg/operator/edgefs/cluster/prepare"
 	"github.com/rook/rook/pkg/operator/edgefs/cluster/target"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	httpPortDefault           = int32(8080)
-	httpPortName              = "http"
-	grpcPortDefault           = int32(6789)
-	grpcPortName              = "grpc"
-	udpTotemPortDefault       = int32(5405)
-	udpTotemPortName          = "totem"
-	volumeNameDataDir         = "datadir"
-	defaultServiceAccountName = "rook-edgefs-cluster"
-
 	/* Volumes definitions */
 	configName = "edgefs-config"
 )
@@ -79,7 +71,7 @@ type childController interface {
 
 // createInstance returns done [true - no need to polling status, false continue polling]
 func (c *cluster) createInstance(rookImage string, isClusterUpdate bool) (bool, error) {
-
+	ctx := context.TODO()
 	logger.Debugf("Cluster [%s] spec: %+v", c.Namespace, c.Spec)
 
 	// Validate Cluster CRD
@@ -100,7 +92,7 @@ func (c *cluster) createInstance(rookImage string, isClusterUpdate bool) (bool, 
 		Data: placeholderConfig,
 	}
 	k8sutil.SetOwnerRef(&cm.ObjectMeta, &c.ownerRef)
-	_, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(cm)
+	_, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
 			// Cluster already exists, do not do anything
@@ -140,10 +132,10 @@ func (c *cluster) createInstance(rookImage string, isClusterUpdate bool) (bool, 
 	dro := ParseDevicesResurrectMode(c.Spec.DevicesResurrectMode)
 	logger.Infof("DevicesResurrect options: %+v", dro)
 
-	// Retrive existing cluster config from Kubernetes ConfigMap
+	// Retrieve existing cluster config from Kubernetes ConfigMap
 	existingConfig, err := c.retrieveDeploymentConfig()
 	if err != nil {
-		return true, fmt.Errorf("Failed to retrive DeploymentConfig for cluster [%s]. Error: %s", c.Namespace, err)
+		return true, fmt.Errorf("Failed to retrieve DeploymentConfig for cluster [%s]. Error: %s", c.Namespace, err)
 	}
 
 	clusterReconfiguration, err := c.createClusterReconfigurationSpec(existingConfig, clusterNodes, dro)
@@ -181,7 +173,7 @@ func (c *cluster) createInstance(rookImage string, isClusterUpdate bool) (bool, 
 	// Skip preparation job in case of resurrect option is on
 	//
 
-	if c.Spec.SkipHostPrepare == false && dro.NeedToResurrect == false {
+	if !c.Spec.SkipHostPrepare && !dro.NeedToResurrect {
 		err = c.prepareHostNodes(rookImage, clusterReconfiguration.DeploymentConfig)
 		if err != nil {
 			logger.Errorf("Failed to create [%s] cluster preparation jobs. %+v", c.Namespace, err)

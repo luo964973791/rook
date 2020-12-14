@@ -16,10 +16,14 @@ limitations under the License.
 package osd
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	testexec "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
@@ -28,6 +32,12 @@ import (
 )
 
 func TestPrepareDeviceSets(t *testing.T) {
+	testPrepareDeviceSets(t, true)
+	testPrepareDeviceSets(t, false)
+}
+
+func testPrepareDeviceSets(t *testing.T, setTemplateName bool) {
+	ctx := context.TODO()
 	clientset := testexec.New(t, 1)
 	context := &clusterd.Context{
 		Clientset: clientset,
@@ -36,17 +46,23 @@ func TestPrepareDeviceSets(t *testing.T) {
 	claim := v1.PersistentVolumeClaim{Spec: v1.PersistentVolumeClaimSpec{
 		StorageClassName: &storageClass,
 	}}
+	if setTemplateName {
+		claim.Name = "randomname"
+	}
 	deviceSet := rookv1.StorageClassDeviceSet{
 		Name:                 "mydata",
 		Count:                1,
 		Portable:             true,
 		VolumeClaimTemplates: []v1.PersistentVolumeClaim{claim},
+		SchedulerName:        "custom-scheduler",
 	}
-	desired := rookv1.StorageScopeSpec{StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{deviceSet}}
+	spec := cephv1.ClusterSpec{
+		Storage: rookv1.StorageScopeSpec{StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{deviceSet}},
+	}
 	cluster := &Cluster{
-		context:        context,
-		DesiredStorage: desired,
-		Namespace:      "testns",
+		context:     context,
+		clusterInfo: client.AdminClusterInfo("testns"),
+		spec:        spec,
 	}
 
 	config := &provisionConfig{}
@@ -57,13 +73,18 @@ func TestPrepareDeviceSets(t *testing.T) {
 	assert.True(t, volumeSources[0].Portable)
 	_, dataOK := volumeSources[0].PVCSources["data"]
 	assert.True(t, dataOK)
+	assert.Equal(t, "custom-scheduler", volumeSources[0].SchedulerName)
 
 	// Verify that the PVC has the expected generated name with the default of "data" in the name
-	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(cluster.Namespace).List(metav1.ListOptions{})
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(pvcs.Items))
-	assert.Equal(t, "mydata-data-0-", pvcs.Items[0].GenerateName)
-	assert.Equal(t, cluster.Namespace, pvcs.Items[0].Namespace)
+	expectedName := claim.Name
+	if !setTemplateName {
+		expectedName = "data"
+	}
+	assert.Equal(t, fmt.Sprintf("mydata-%s-0-", expectedName), pvcs.Items[0].GenerateName)
+	assert.Equal(t, cluster.clusterInfo.Namespace, pvcs.Items[0].Namespace)
 }
 
 func TestUpdatePVCSize(t *testing.T) {
@@ -72,8 +93,8 @@ func TestUpdatePVCSize(t *testing.T) {
 		Clientset: clientset,
 	}
 	cluster := &Cluster{
-		context:   context,
-		Namespace: "testns",
+		context:     context,
+		clusterInfo: client.AdminClusterInfo("testns"),
 	}
 	current := &v1.PersistentVolumeClaim{}
 	desired := &v1.PersistentVolumeClaim{}

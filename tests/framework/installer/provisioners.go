@@ -66,13 +66,13 @@ func InstallHostPathProvisioner(k8shelper *utils.K8sHelper) error {
 	err = k8shelper.WaitForLabeledPodsToRun("k8s-app=hostpath-provisioner", "kube-system")
 	if err != nil {
 		logger.Errorf("hostpath provisioner pod is not running: %+v", err)
-		k8shelper.GetPodDescribeFromNamespace("kube-system", "hostPathProvisioner", Env.HostType)
+		k8shelper.GetPodDescribeFromNamespace("kube-system", "hostPathProvisioner", utils.TestEnvName())
 		k8shelper.PrintStorageClasses(true /*detailed*/)
 		return err
 	}
 
-	err = k8shelper.IsStorageClassPresent(hostPathStorageClassName)
-	if err != nil {
+	present, err := k8shelper.IsStorageClassPresent(hostPathStorageClassName)
+	if !present {
 		logger.Errorf("storageClass %s not found: %+v", hostPathStorageClassName, err)
 		k8shelper.PrintStorageClasses(true /*detailed*/)
 		return err
@@ -114,7 +114,7 @@ func getHostPathProvisionerDeployment() (string, error) {
 	// The hostpath provisioner project is readonly so we can't submit a PR.
 	// Until we replace this completely, we'll just replace the necessary string.
 	deploymentResourceURL := fmt.Sprintf(hostPathProvisionerResourceBaseURL, hostPathProvisionerDeployment)
-	response, err := http.Get(deploymentResourceURL)
+	response, err := http.Get(deploymentResourceURL) //nolint:gosec // We safely suppress gosec in tests file
 	if err != nil {
 		return "", fmt.Errorf("failed to get hostpath provisioner deployment. %+v", err)
 	}

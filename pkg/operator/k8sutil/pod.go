@@ -18,6 +18,7 @@ limitations under the License.
 package k8sutil
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -158,6 +159,7 @@ func AddUnreachableNodeToleration(podSpec *v1.PodSpec) {
 // GetRunningPod reads the name and namespace of a pod from the
 // environment, and returns the pod (if it exists).
 func GetRunningPod(clientset kubernetes.Interface) (*v1.Pod, error) {
+	ctx := context.TODO()
 	podName := os.Getenv(PodNameEnvVar)
 	if podName == "" {
 		return nil, fmt.Errorf("cannot detect the pod name. Please provide it using the downward API in the manifest file")
@@ -167,7 +169,7 @@ func GetRunningPod(clientset kubernetes.Interface) (*v1.Pod, error) {
 		return nil, fmt.Errorf("cannot detect the pod namespace. Please provide it using the downward API in the manifest file")
 	}
 
-	pod, err := clientset.CoreV1().Pods(podNamespace).Get(podName, metav1.GetOptions{})
+	pod, err := clientset.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +189,8 @@ func GetMatchingContainer(containers []v1.Container, name string) (v1.Container,
 		// if there are multiple pods, we require the container to have the expected name
 		for _, container := range containers {
 			if container.Name == name {
-				result = &container
+				localcontainer := container
+				result = &localcontainer
 				break
 			}
 		}
@@ -211,7 +214,8 @@ func MakeRookImage(version string) string {
 
 // PodsRunningWithLabel returns the number of running pods with the given label
 func PodsRunningWithLabel(clientset kubernetes.Interface, namespace, label string) (int, error) {
-	pods, err := clientset.CoreV1().Pods(namespace).List(metav1.ListOptions{LabelSelector: label})
+	ctx := context.TODO()
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: label})
 	if err != nil {
 		return 0, err
 	}
@@ -246,16 +250,17 @@ func GetPodPhaseMap(pods *v1.PodList) map[v1.PodPhase][]string {
 // GetJobLog gets the logs for the pod. If there is more than one pod with the label selector, the logs from
 // the first pod will be returned.
 func GetPodLog(clientset kubernetes.Interface, namespace string, labelSelector string) (string, error) {
+	ctx := context.TODO()
 	opts := metav1.ListOptions{
 		LabelSelector: labelSelector,
 	}
-	pods, err := clientset.CoreV1().Pods(namespace).List(opts)
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, opts)
 	if err != nil {
 		return "", fmt.Errorf("failed to get version pod. %+v", err)
 	}
 	for _, pod := range pods.Items {
 		req := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &v1.PodLogOptions{})
-		readCloser, err := req.Stream()
+		readCloser, err := req.Stream(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to read from stream. %+v", err)
 		}
@@ -263,7 +268,10 @@ func GetPodLog(clientset kubernetes.Interface, namespace string, labelSelector s
 		builder := &strings.Builder{}
 		defer readCloser.Close()
 		_, err = io.Copy(builder, readCloser)
-		return builder.String(), err
+		if err != nil {
+			return "", errors.Wrapf(err, "error copying file from %s to %s", builder, readCloser)
+		}
+		return builder.String(), err //nolint, no else statement needed
 	}
 
 	return "", fmt.Errorf("did not find any pods with label %s", labelSelector)
@@ -296,7 +304,7 @@ func ClusterDaemonEnvVars(image string) []v1.EnvVar {
 }
 
 // SetNodeAntiAffinityForPod assign pod anti-affinity when pod should not be co-located
-func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuringScheduling, preferredDuringScheduling bool,
+func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuringScheduling bool,
 	labels, nodeSelector map[string]string) {
 	p.ApplyToPodSpec(pod)
 	pod.NodeSelector = nodeSelector
@@ -325,7 +333,7 @@ func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuri
 	if requiredDuringScheduling {
 		paa.RequiredDuringSchedulingIgnoredDuringExecution =
 			append(paa.RequiredDuringSchedulingIgnoredDuringExecution, podAntiAffinity)
-	} else if preferredDuringScheduling {
+	} else {
 		paa.PreferredDuringSchedulingIgnoredDuringExecution =
 			append(paa.PreferredDuringSchedulingIgnoredDuringExecution, v1.WeightedPodAffinityTerm{
 				Weight:          50,
@@ -334,13 +342,14 @@ func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuri
 	}
 }
 
-func ForceDeletePodIfStuck(context *clusterd.Context, pod v1.Pod) error {
+func ForceDeletePodIfStuck(clusterdContext *clusterd.Context, pod v1.Pod) error {
+	ctx := context.TODO()
 	logger.Debugf("checking if pod %q is stuck and should be force deleted", pod.Name)
 	if pod.DeletionTimestamp.IsZero() {
 		logger.Debugf("skipping pod %q restart since the pod is not deleted", pod.Name)
 		return nil
 	}
-	node, err := context.Clientset.CoreV1().Nodes().Get(pod.Spec.NodeName, metav1.GetOptions{})
+	node, err := clusterdContext.Clientset.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
 	if err != nil {
 		return errors.Wrap(err, "node status is not available")
 	}
@@ -351,8 +360,8 @@ func ForceDeletePodIfStuck(context *clusterd.Context, pod v1.Pod) error {
 
 	logger.Infof("force deleting pod %q that appears to be stuck terminating", pod.Name)
 	var gracePeriod int64
-	deleteOpts := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}
-	if err := context.Clientset.CoreV1().Pods(pod.Namespace).Delete(pod.Name, deleteOpts); err != nil {
+	deleteOpts := metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}
+	if err := clusterdContext.Clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOpts); err != nil {
 		logger.Warningf("pod %q deletion failed. %v", pod.Name, err)
 		return nil
 	}

@@ -26,9 +26,9 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume"
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume/attachment"
-	opcluster "github.com/rook/rook/pkg/operator/ceph/cluster"
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -44,7 +44,6 @@ var (
 // ClusterController monitors cluster events and reacts to clean up any affected volume attachments
 type ClusterController struct {
 	context              *clusterd.Context
-	scheme               *runtime.Scheme
 	volumeAttachment     attachment.Attachment
 	flexvolumeController flexvolume.VolumeController
 }
@@ -67,7 +66,7 @@ func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 	}
 
 	logger.Infof("start watching cluster resources")
-	go k8sutil.WatchCR(opcluster.ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient(), &cephv1.CephCluster{}, stopCh)
+	go k8sutil.WatchCR(opcontroller.ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient(), &cephv1.CephCluster{}, stopCh)
 }
 
 func (c *ClusterController) onDelete(obj interface{}) {

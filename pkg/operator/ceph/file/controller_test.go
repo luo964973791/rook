@@ -147,6 +147,7 @@ var (
 )
 
 func TestCephFilesystemController(t *testing.T) {
+	ctx := context.TODO()
 	// Set DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 	os.Setenv("ROOK_LOG_LEVEL", "DEBUG")
@@ -169,7 +170,6 @@ func TestCephFilesystemController(t *testing.T) {
 		},
 		TypeMeta: controllerTypeMeta,
 	}
-	cephCluster := &cephv1.CephCluster{}
 
 	// Objects to track in the fake client.
 	object := []runtime.Object{
@@ -224,7 +224,7 @@ func TestCephFilesystemController(t *testing.T) {
 	//
 	// FAILURE we have a cluster but it's not ready
 	//
-	cephCluster = &cephv1.CephCluster{
+	cephCluster := &cephv1.CephCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespace,
 			Namespace: namespace,
@@ -255,7 +255,6 @@ func TestCephFilesystemController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -268,7 +267,7 @@ func TestCephFilesystemController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster

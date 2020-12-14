@@ -46,7 +46,7 @@ spec:
   dataPools:
     - replicated:
         size: 3
-  preservePoolsOnDelete: true
+  preserveFilesystemOnDelete: true
   metadataServer:
     activeCount: 1
     activeStandby: true
@@ -109,6 +109,8 @@ parameters:
   # in the same namespace as the cluster.
   csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
   csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
   csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
   csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
 
@@ -238,13 +240,13 @@ kubectl delete -f kube-registry.yaml
 
 To delete the filesystem components and backing data, delete the Filesystem CRD.
 
-> **WARNING: Data will be deleted if preservePoolsOnDelete=false**.
+> **WARNING: Data will be deleted if preserveFilesystemOnDelete=false**.
 
 ```console
 kubectl -n rook-ceph delete cephfilesystem myfs
 ```
 
-Note: If the "preservePoolsOnDelete" filesystem attribute is set to true, the above command won't delete the pools. Creating again the filesystem with the same CRD will reuse again the previous pools.
+Note: If the "preserveFilesystemOnDelete" filesystem attribute is set to true, the above command won't delete the filesystem. Recreating the same CRD will reuse the existing filesystem.
 
 ## Flex Driver
 

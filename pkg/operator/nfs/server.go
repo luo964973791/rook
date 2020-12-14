@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Portion of this file is comming from https://github.com/kubernetes-incubator/external-storage/blob/master/nfs/pkg/server/server.go
+// Portion of this file is coming from https://github.com/kubernetes-incubator/external-storage/blob/master/nfs/pkg/server/server.go
 package nfs
 
 import (
@@ -66,6 +66,7 @@ func Setup(ganeshaConfig string) error {
 func Run(ganeshaConfig string) error {
 	// Start ganesha.nfsd
 	logger.Infof("Running NFS server!")
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command("ganesha.nfsd", "-F", "-L", ganeshaLog, "-f", ganeshaConfig, "-N", ganeshaOptions)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("ganesha.nfsd failed with error: %v, output: %s", err, out)

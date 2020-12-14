@@ -48,7 +48,7 @@ GO_TEST_FLAGS ?=
 # ====================================================================================
 # Setup go environment
 
-GO_SUPPORTED_VERSIONS ?= 1.13|1.14
+GO_SUPPORTED_VERSIONS ?= 1.13|1.14|1.15
 
 GO_PACKAGES := $(foreach t,$(GO_SUBDIRS),$(GO_PROJECT)/$(t)/...)
 GO_INTEGRATION_TEST_PACKAGES := $(foreach t,$(GO_INTEGRATION_TESTS_SUBDIRS),$(GO_PROJECT)/$(t)/integration)
@@ -91,7 +91,7 @@ endif
 # the build. Please keep them in sync.
 
 # we run go build with -i which on most system's would want to install packages
-# into the system's root dir. using our own pkg dir avoid thats
+# into the system's root dir. using our own pkg dir avoid this
 ifneq ($(GO_PKG_DIR),)
 GO_PKG_BASE_DIR := $(abspath $(GO_PKG_DIR)/$(PLATFORM))
 GO_PKG_STATIC_FLAGS := -pkgdir $(GO_PKG_BASE_DIR)_static

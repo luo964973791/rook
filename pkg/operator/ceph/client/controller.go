@@ -18,6 +18,7 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -28,7 +29,8 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	ceph "github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -109,24 +111,31 @@ func genClientEntity(p *cephv1.CephClient, context *clusterd.Context) (clientEnt
 }
 
 // Create the client
-func createClient(context *clusterd.Context, p *cephv1.CephClient) error {
+func createClient(clusterdContext *clusterd.Context, p *cephv1.CephClient) error {
+	ctx := context.TODO()
 	logger.Infof("creating client %s in namespace %s", p.Name, p.Namespace)
 
-	clientEntity, caps, err := genClientEntity(p, context)
+	clientEntity, caps, err := genClientEntity(p, clusterdContext)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate client entity %q", p.Name)
 	}
 
+	// Populate clusterInfo during each reconcile
+	clusterInfo, _, _, err := mon.LoadClusterInfo(clusterdContext, p.Namespace)
+	if err != nil {
+		return errors.Wrapf(err, "cluster %s is not yet available for creating the ceph clients", p.Namespace)
+	}
+
 	// Check if client was created manually, create if necessary or update caps and create secret
-	key, err := ceph.AuthGetKey(context, p.Namespace, clientEntity)
+	key, err := ceph.AuthGetKey(clusterdContext, clusterInfo, clientEntity)
 	if err != nil {
 		// Example in pkg/operator/ceph/config/keyring/store.go:65
-		key, err = ceph.AuthGetOrCreateKey(context, p.Namespace, clientEntity, caps)
+		key, err = ceph.AuthGetOrCreateKey(clusterdContext, clusterInfo, clientEntity, caps)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create client %q", p.Name)
 		}
 	} else {
-		err = ceph.AuthUpdateCaps(context, p.Namespace, clientEntity, caps)
+		err = ceph.AuthUpdateCaps(clusterdContext, clusterInfo, clientEntity, caps)
 		if err != nil {
 			return errors.Wrapf(err, "client %q exists, failed to update client caps", p.Name)
 		}
@@ -144,11 +153,11 @@ func createClient(context *clusterd.Context, p *cephv1.CephClient) error {
 	}
 
 	secretName := secret.ObjectMeta.Name
-	_, err = context.Clientset.CoreV1().Secrets(p.Namespace).Get(secretName, metav1.GetOptions{})
+	_, err = clusterdContext.Clientset.CoreV1().Secrets(p.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debugf("creating secret for %s", secretName)
-			if _, err := context.Clientset.CoreV1().Secrets(p.Namespace).Create(secret); err != nil {
+			if _, err := clusterdContext.Clientset.CoreV1().Secrets(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 				return errors.Wrapf(err, "failed to create secret for %q", secretName)
 			}
 			return nil
@@ -156,7 +165,7 @@ func createClient(context *clusterd.Context, p *cephv1.CephClient) error {
 		return errors.Wrapf(err, "failed to get secret for %q", secretName)
 	}
 	logger.Debugf("updating secret for %s", secretName)
-	if _, err := context.Clientset.CoreV1().Secrets(p.Namespace).Update(secret); err != nil {
+	if _, err := clusterdContext.Clientset.CoreV1().Secrets(p.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		return errors.Wrapf(err, "failed to update secret for %q", secretName)
 	}
 
@@ -167,12 +176,15 @@ func createClient(context *clusterd.Context, p *cephv1.CephClient) error {
 func updateClient(context *clusterd.Context, p *cephv1.CephClient) error {
 	logger.Infof("updating client %s in namespace %s", p.Name, p.Namespace)
 
+	// assume we have been given the admin key for configuring cephx clients
+	clusterInfo := cephclient.AdminClusterInfo(p.Namespace)
+
 	clientEntity, caps, err := genClientEntity(p, context)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate client entity %q", p.Name)
 	}
 
-	err = ceph.AuthUpdateCaps(context, p.Namespace, clientEntity, caps)
+	err = ceph.AuthUpdateCaps(context, clusterInfo, clientEntity, caps)
 	if err != nil {
 		return errors.Wrapf(err, "failed to update client %q", p.Name)
 	}
@@ -208,7 +220,7 @@ func (c *ClientController) onUpdate(oldObj, newObj interface{}) {
 	}
 }
 
-func (c *ClientController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo) {
+func (c *ClientController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephclient.ClusterInfo) {
 	logger.Debugf("No need to update the client after the parent cluster changed")
 }
 
@@ -236,13 +248,17 @@ func (c *ClientController) onDelete(obj interface{}) {
 }
 
 // Delete the client
-func deleteClient(context *clusterd.Context, p *cephv1.CephClient) error {
+func deleteClient(clusterdContext *clusterd.Context, p *cephv1.CephClient) error {
+	ctx := context.TODO()
+	// assume we have been given the admin key for configuring cephx clients
+	clusterInfo := cephclient.AdminClusterInfo(p.Namespace)
+
 	clientEntity := fmt.Sprintf("client.%s", p.Name)
-	if err := ceph.AuthDelete(context, p.Namespace, clientEntity); err != nil {
+	if err := ceph.AuthDelete(clusterdContext, clusterInfo, clientEntity); err != nil {
 		return errors.Wrapf(err, "failed to delete client %q", p.Name)
 	}
 	secretName := fmt.Sprintf("%s-client-key", p.Name)
-	if err := context.Clientset.CoreV1().Secrets(p.Namespace).Delete(secretName, &metav1.DeleteOptions{}); err != nil && !kerrors.IsNotFound(err) {
+	if err := clusterdContext.Clientset.CoreV1().Secrets(p.Namespace).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !kerrors.IsNotFound(err) {
 		return errors.Errorf("failed to remote client %q secret %q", p.Name, secretName)
 	}
 
@@ -250,8 +266,8 @@ func deleteClient(context *clusterd.Context, p *cephv1.CephClient) error {
 }
 
 // Check if the client exists
-func clientExists(context *clusterd.Context, p *cephv1.CephClient) (bool, error) {
-	_, err := ceph.AuthGetKey(context, p.Namespace, p.Name)
+func clientExists(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, p *cephv1.CephClient) (bool, error) {
+	_, err := ceph.AuthGetKey(context, clusterInfo, p.Name)
 	if err != nil {
 		return false, err
 	}

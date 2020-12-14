@@ -62,3 +62,4 @@ find "${scriptdir}/../../pkg/client" -name "*.go" -exec \
 find "${scriptdir}/../../pkg/client" -name "*.go" -exec \
     $SED 's/cephNFSs/cephNFSes/g' {} +
 find "${scriptdir}/../../pkg/client" -name "*.go.bak" -delete
+find "${scriptdir}/../../pkg/apis" -name "zz_generated.deepcopy.go.bak" -delete

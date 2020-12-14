@@ -45,11 +45,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	getVersionRetryInterval = 5
-	getVersionMaxRetries    = 60
-)
-
 var (
 	logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 	// Implement reconcile.Reconciler so the controller can reconcile objects
@@ -77,30 +72,32 @@ func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, 
 }
 
 func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, error) {
-
 	logger.Debugf("reconciling node: %q", request.Name)
 
 	// get the node object
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: request.Name}}
 	err := r.client.Get(context.TODO(), request.NamespacedName, node)
 	if err != nil {
-		//if a node is not present, check if there are any crashcollector deployment for that node and delete it.
-		deploymentList := &appsv1.DeploymentList{}
-		namespaceListOpts := client.InNamespace(request.Namespace)
-		err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels{k8sutil.AppAttr: AppName, NodeNameLabel: request.Name}, namespaceListOpts)
-		if err != nil {
-			logger.Errorf("failed to list crash collector deployments, delete it/them manually. %v", err)
-		}
-		for _, d := range deploymentList.Items {
-			logger.Infof("deleting deployment %q for deleted node %q", d.ObjectMeta.Name, request.Name)
-			err := r.deleteCrashCollector(d)
+		if kerrors.IsNotFound(err) {
+			// if a node is not present, check if there are any crashcollector deployment for that node and delete it.
+			deploymentList := &appsv1.DeploymentList{}
+			namespaceListOpts := client.InNamespace(request.Namespace)
+			err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels{k8sutil.AppAttr: AppName, NodeNameLabel: request.Name}, namespaceListOpts)
 			if err != nil {
-				logger.Errorf("failed to delete crash collector deployment %q, delete it manually. %v", d.Name, err)
-				continue
+				logger.Errorf("failed to list crash collector deployments, delete it/them manually. %v", err)
 			}
-			logger.Infof("crash collector deployment %q successfully removed", d.Name)
+			for _, d := range deploymentList.Items {
+				logger.Infof("deleting deployment %q for deleted node %q", d.ObjectMeta.Name, request.Name)
+				err := r.deleteCrashCollector(d)
+				if err != nil {
+					logger.Errorf("failed to delete crash collector deployment %q, delete it manually. %v", d.Name, err)
+					continue
+				}
+				logger.Infof("crash collector deployment %q successfully removed from dead node %q", d.Name, request.Name)
+			}
+		} else {
+			return reconcile.Result{}, errors.Wrapf(err, "could not get node %q", request.Name)
 		}
-		return reconcile.Result{}, errors.Errorf("could not get node %q", request.NamespacedName)
 	}
 
 	// Get the list of all the Ceph pods
@@ -109,7 +106,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		if len(cephPods) == 0 {
 			return reconcile.Result{}, nil
 		}
-		return reconcile.Result{}, errors.Wrapf(err, "failed to list all ceph pods")
+		return reconcile.Result{}, errors.Wrap(err, "failed to list all ceph pods")
 	}
 
 	namespaceToPodList := make(map[string][]corev1.Pod)

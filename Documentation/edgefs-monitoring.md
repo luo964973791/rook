@@ -8,6 +8,8 @@ indent: true
 
 # EdgeFS Monitoring
 
+[Deprecated](https://github.com/rook/rook/issues/5823#issuecomment-703834989)
+
 Each Rook EdgeFS cluster has some built in metrics collectors/exporters for monitoring with [Prometheus](https://prometheus.io/).
 If you do not have Prometheus running, follow the steps below to enable monitoring of Rook. If your cluster already
 contains a Prometheus instance, it will automatically discover Rooks scrape endpoint using the standard
@@ -36,7 +38,7 @@ With the Prometheus operator running, we can create a service monitor that will 
 From the root of your locally cloned Rook repo, go the monitoring directory:
 
 ```console
-git clone --single-branch --branch {{ branchName }} https://github.com/rook/rook.git
+git clone --single-branch --branch v1.5.3 https://github.com/rook/rook.git
 cd rook/cluster/examples/kubernetes/edgefs/monitoring
 ```
 

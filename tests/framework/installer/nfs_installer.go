@@ -17,6 +17,7 @@ limitations under the License.
 package installer
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -144,25 +145,26 @@ func (h *NFSInstaller) CreateNFSServerVolume(namespace string) error {
 
 // UninstallNFSServer uninstalls the NFS Server from the given namespace
 func (h *NFSInstaller) UninstallNFSServer(systemNamespace, namespace string) {
+	ctx := context.TODO()
 	logger.Infof("uninstalling nfsserver from namespace %s", namespace)
 
 	err := h.k8shelper.DeleteResource("pvc", "nfs-pv-claim")
-	checkError(h.T(), err, fmt.Sprintf("cannot remove nfs pvc : nfs-pv-claim"))
+	checkError(h.T(), err, "cannot remove nfs pvc : nfs-pv-claim")
 
 	err = h.k8shelper.DeleteResource("pvc", "nfs-pv-claim-bigger")
-	checkError(h.T(), err, fmt.Sprintf("cannot remove nfs pvc : nfs-pv-claim-bigger"))
+	checkError(h.T(), err, "cannot remove nfs pvc : nfs-pv-claim-bigger")
 
 	err = h.k8shelper.DeleteResource("pv", "nfs-pv")
-	checkError(h.T(), err, fmt.Sprintf("cannot remove nfs pv : nfs-pv"))
+	checkError(h.T(), err, "cannot remove nfs pv : nfs-pv")
 
 	err = h.k8shelper.DeleteResource("pv", "nfs-pv1")
-	checkError(h.T(), err, fmt.Sprintf("cannot remove nfs pv : nfs-pv1"))
+	checkError(h.T(), err, "cannot remove nfs pv : nfs-pv1")
 
 	err = h.k8shelper.DeleteResource("-n", namespace, "nfsservers.nfs.rook.io", namespace)
 	checkError(h.T(), err, fmt.Sprintf("cannot remove nfsserver %s", namespace))
 
 	crdCheckerFunc := func() error {
-		_, err := h.k8shelper.RookClientset.NfsV1alpha1().NFSServers(namespace).Get(namespace, metav1.GetOptions{})
+		_, err := h.k8shelper.RookClientset.NfsV1alpha1().NFSServers(namespace).Get(ctx, namespace, metav1.GetOptions{})
 		return err
 	}
 	err = h.k8shelper.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
@@ -182,18 +184,18 @@ func (h *NFSInstaller) UninstallNFSServer(systemNamespace, namespace string) {
 	err = UninstallHostPathProvisioner(h.k8shelper)
 	checkError(h.T(), err, "cannot uninstall hostpath provisioner")
 
-	h.k8shelper.Clientset.RbacV1beta1().ClusterRoleBindings().Delete("anon-user-access", nil)
-	h.k8shelper.Clientset.RbacV1beta1().ClusterRoleBindings().Delete("run-nfs-client-provisioner", nil)
-	h.k8shelper.Clientset.RbacV1beta1().ClusterRoles().Delete("nfs-client-provisioner-runner", nil)
+	h.k8shelper.Clientset.RbacV1().ClusterRoleBindings().Delete(ctx, "anon-user-access", metav1.DeleteOptions{})           //nolint, asserting this failing in CI
+	h.k8shelper.Clientset.RbacV1().ClusterRoleBindings().Delete(ctx, "run-nfs-client-provisioner", metav1.DeleteOptions{}) //nolint, asserting this failing in CI
+	h.k8shelper.Clientset.RbacV1().ClusterRoles().Delete(ctx, "nfs-client-provisioner-runner", metav1.DeleteOptions{})     //nolint, asserting this failing in CI
 	logger.Infof("done removing the operator from namespace %s", systemNamespace)
 }
 
 // GatherAllNFSServerLogs gathers all NFS Server logs
 func (h *NFSInstaller) GatherAllNFSServerLogs(systemNamespace, namespace, testName string) {
-	if !h.T().Failed() && Env.Logs != "all" {
+	if !h.T().Failed() && TestLogCollectionLevel() != "all" {
 		return
 	}
 	logger.Infof("Gathering all logs from NFSServer %s", namespace)
-	h.k8shelper.GetLogsFromNamespace(systemNamespace, testName, Env.HostType)
-	h.k8shelper.GetLogsFromNamespace(namespace, testName, Env.HostType)
+	h.k8shelper.GetLogsFromNamespace(systemNamespace, testName, utils.TestEnvName())
+	h.k8shelper.GetLogsFromNamespace(namespace, testName, utils.TestEnvName())
 }

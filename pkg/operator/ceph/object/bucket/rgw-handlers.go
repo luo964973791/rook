@@ -15,17 +15,6 @@ func (p *Provisioner) bucketExists(name string) (bool, error) {
 	return true, nil
 }
 
-func (p *Provisioner) bucketIsEmpty(name string) (bool, error) {
-	bucketStat, _, err := cephObject.GetBucketStats(p.objectContext, name)
-	if err != nil {
-		return false, errors.Wrapf(err, "error getting ceph bucket %q", name)
-	}
-	if bucketStat.NumberOfObjects == 0 {
-		return true, nil
-	}
-	return false, nil
-}
-
 func (p *Provisioner) userExists(name string) (bool, error) {
 	_, errCode, err := cephObject.GetUser(p.objectContext, name)
 	if errCode == cephObject.RGWErrorNotFound {
@@ -43,7 +32,7 @@ func (p *Provisioner) createCephUser(username string) (accKey string, secKey str
 	if len(username) == 0 {
 		username, err = p.genUserName()
 		if len(username) == 0 || err != nil {
-			return "", "", errors.Wrapf(err, "no user name provided and unable to generate a unique name")
+			return "", "", errors.Wrap(err, "no user name provided and unable to generate a unique name")
 		}
 	}
 	p.cephUserName = username
@@ -100,7 +89,7 @@ func (p *Provisioner) deleteOBCResource(bucketName string) error {
 	}
 	if len(bucketName) > 0 {
 		// delete bucket with purge option to remove all objects
-		errCode, err := cephObject.DeleteBucket(p.objectContext, bucketName, true)
+		errCode, err := cephObject.DeleteObjectBucket(p.objectContext, bucketName, true)
 
 		if errCode == cephObject.RGWErrorNone {
 			logger.Infof("bucket %q successfully deleted", p.bucketName)

@@ -18,15 +18,10 @@ package integration
 import (
 	"testing"
 
-	"github.com/coreos/pkg/capnslog"
 	"github.com/rook/rook/tests/framework/clients"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
 	"github.com/stretchr/testify/suite"
-)
-
-var (
-	hslogger = capnslog.NewPackageLogger("github.com/rook/rook", "helmSmokeTest")
 )
 
 // ***************************************************
@@ -36,9 +31,9 @@ var (
 // Monitors
 // - One mon
 // OSDs
-// - Bluestore running on a directory
+// - Bluestore running on a raw block device
 // Block
-// - Create a pool in each cluster
+// - Create a pool in the cluster
 // - Mount/unmount a block device through the dynamic provisioner
 // File system
 // - Create a file system via the CRD
@@ -59,19 +54,30 @@ func TestCephHelmSuite(t *testing.T) {
 
 type HelmSuite struct {
 	suite.Suite
-	helper          *clients.TestClient
-	kh              *utils.K8sHelper
-	op              *TestCluster
-	namespace       string
-	rookCephCleanup bool
+	helper    *clients.TestClient
+	kh        *utils.K8sHelper
+	op        *TestCluster
+	namespace string
 }
 
 func (hs *HelmSuite) SetupSuite() {
 	hs.namespace = "helm-ns"
-	mons := 1
-	rbdMirrorWorkers := 1
-	rookCephCleanup := true
-	hs.op, hs.kh = StartTestCluster(hs.T, helmMinimalTestVersion, hs.namespace, "bluestore", true, false, "", mons, rbdMirrorWorkers, installer.VersionMaster, installer.NautilusVersion, rookCephCleanup)
+	helmTestCluster := TestCluster{
+		namespace:               hs.namespace,
+		storeType:               "bluestore",
+		storageClassName:        "",
+		useHelm:                 true,
+		usePVC:                  false,
+		mons:                    1,
+		rbdMirrorWorkers:        1,
+		rookCephCleanup:         true,
+		skipOSDCreation:         false,
+		minimalMatrixK8sVersion: helmMinimalTestVersion,
+		rookVersion:             installer.VersionMaster,
+		cephVersion:             installer.NautilusVersion,
+	}
+
+	hs.op, hs.kh = StartTestCluster(hs.T, &helmTestCluster)
 	hs.helper = clients.CreateTestClient(hs.kh, hs.op.installer.Manifests)
 }
 

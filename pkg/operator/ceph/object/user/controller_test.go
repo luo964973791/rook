@@ -88,6 +88,7 @@ var (
 )
 
 func TestCephObjectStoreUserController(t *testing.T) {
+	ctx := context.TODO()
 	// Set DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 
@@ -191,7 +192,6 @@ func TestCephObjectStoreUserController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -204,7 +204,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster
@@ -253,6 +253,9 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		TypeMeta: metav1.TypeMeta{
 			Kind: "CephObjectStore",
 		},
+		Status: &cephv1.ObjectStoreStatus{
+			Info: map[string]string{"endpoint": "http://rook-ceph-rgw-my-store.rook-ceph:80"},
+		},
 	}
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStore{})
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStoreList{})
@@ -290,6 +293,22 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, res.Requeue)
 	err = r.client.Get(context.TODO(), req.NamespacedName, objectUser)
+	assert.NoError(t, err)
 	assert.Equal(t, "Ready", objectUser.Status.Phase, objectUser)
 	logger.Info("PHASE 5 DONE")
+}
+
+func TestBuildUpdateStatusInfo(t *testing.T) {
+	cephObjectStoreUser := &cephv1.CephObjectStoreUser{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: cephv1.ObjectStoreUserSpec{
+			Store: store,
+		},
+	}
+
+	statusInfo := generateStatusInfo(cephObjectStoreUser)
+	assert.NotEmpty(t, statusInfo["secretName"])
+	assert.Equal(t, "rook-ceph-object-user-my-store-my-user", statusInfo["secretName"])
 }

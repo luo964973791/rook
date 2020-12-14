@@ -19,6 +19,7 @@ package csi
 import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -109,7 +110,7 @@ func cephCSIKeyringCephFSProvisionerCaps() []string {
 	}
 }
 
-func createOrUpdateCSISecret(namespace, csiRBDProvisionerSecretKey, csiRBDNodeSecretKey, csiCephFSProvisionerSecretKey, csiCephFSNodeSecretKey string, k *keyring.SecretStore, ownerRef *metav1.OwnerReference) error {
+func createOrUpdateCSISecret(clusterInfo *client.ClusterInfo, csiRBDProvisionerSecretKey, csiRBDNodeSecretKey, csiCephFSProvisionerSecretKey, csiCephFSNodeSecretKey string, k *keyring.SecretStore) error {
 	csiRBDProvisionerSecrets := map[string][]byte{
 		// userID is expected for the rbd provisioner driver
 		"userID":  []byte("csi-rbd-provisioner"),
@@ -144,56 +145,56 @@ func createOrUpdateCSISecret(namespace, csiRBDProvisionerSecretKey, csiRBDNodeSe
 		s := &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      secretName,
-				Namespace: namespace,
+				Namespace: clusterInfo.Namespace,
 			},
 			Data: secret,
 			Type: k8sutil.RookType,
 		}
-		k8sutil.SetOwnerRef(&s.ObjectMeta, ownerRef)
+		k8sutil.SetOwnerRef(&s.ObjectMeta, &clusterInfo.OwnerRef)
 
 		// Create Kubernetes Secret
 		err := k.CreateSecret(s)
 		if err != nil {
-			return errors.Wrapf(err, "failed to create kubernetes secret %q for cluster %q", secret, namespace)
+			return errors.Wrapf(err, "failed to create kubernetes secret %q for cluster %q", secret, clusterInfo.Namespace)
 		}
 
 	}
 
-	logger.Infof("created kubernetes csi secrets for cluster %q", namespace)
+	logger.Infof("created kubernetes csi secrets for cluster %q", clusterInfo.Namespace)
 	return nil
 }
 
 // CreateCSISecrets creates all the Kubernetes CSI Secrets
-func CreateCSISecrets(context *clusterd.Context, clusterName string, ownerRef *metav1.OwnerReference) error {
-	k := keyring.GetSecretStore(context, clusterName, ownerRef)
+func CreateCSISecrets(context *clusterd.Context, clusterInfo *client.ClusterInfo) error {
+	k := keyring.GetSecretStore(context, clusterInfo, &clusterInfo.OwnerRef)
 
 	// Create CSI RBD Provisioner Ceph key
 	csiRBDProvisionerSecretKey, err := createCSIKeyringRBDProvisioner(k)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create csi rbd provisioner ceph keyring")
+		return errors.Wrap(err, "failed to create csi rbd provisioner ceph keyring")
 	}
 
 	// Create CSI RBD Node Ceph key
 	csiRBDNodeSecretKey, err := createCSIKeyringRBDNode(k)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create csi rbd node ceph keyring")
+		return errors.Wrap(err, "failed to create csi rbd node ceph keyring")
 	}
 
 	// Create CSI Cephfs provisioner Ceph key
 	csiCephFSProvisionerSecretKey, err := createCSIKeyringCephFSProvisioner(k)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create csi cephfs provisioner ceph keyring")
+		return errors.Wrap(err, "failed to create csi cephfs provisioner ceph keyring")
 	}
 
 	// Create CSI Cephfs node Ceph key
 	csiCephFSNodeSecretKey, err := createCSIKeyringCephFSNode(k)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create csi cephfs node ceph keyring")
+		return errors.Wrap(err, "failed to create csi cephfs node ceph keyring")
 	}
 
 	// Create or update Kubernetes CSI secret
-	if err := createOrUpdateCSISecret(clusterName, csiRBDProvisionerSecretKey, csiRBDNodeSecretKey, csiCephFSProvisionerSecretKey, csiCephFSNodeSecretKey, k, ownerRef); err != nil {
-		return errors.Wrapf(err, "failed to create kubernetes csi secret")
+	if err := createOrUpdateCSISecret(clusterInfo, csiRBDProvisionerSecretKey, csiRBDNodeSecretKey, csiCephFSProvisionerSecretKey, csiCephFSNodeSecretKey, k); err != nil {
+		return errors.Wrap(err, "failed to create kubernetes csi secret")
 	}
 
 	return nil

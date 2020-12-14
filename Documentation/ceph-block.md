@@ -63,12 +63,15 @@ parameters:
     # The secrets contain Ceph admin credentials.
     csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
     csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+    csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+    csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
     csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
     csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
 
     # Specify the filesystem type of the volume. If not specified, csi-provisioner
-    # will set default as `ext4`.
-    csi.storage.k8s.io/fstype: xfs
+    # will set default as `ext4`. Note that `xfs` is not recommended due to potential deadlock
+    # in hyperconverged settings where the volume is mounted on the same node as the osds.
+    csi.storage.k8s.io/fstype: ext4
 
 # Delete the rbd volume when a PVC is deleted
 reclaimPolicy: Delete
@@ -169,7 +172,7 @@ parameters:
   # The value of "clusterNamespace" MUST be the same as the one in which your rook cluster exist
   clusterNamespace: rook-ceph
   # Specify the filesystem type of the volume. If not specified, it will use `ext4`.
-  fstype: xfs
+  fstype: ext4
 # Optional, default reclaimPolicy is "Delete". Other options are: "Retain", "Recycle" as documented in https://kubernetes.io/docs/concepts/storage/storage-classes/
 reclaimPolicy: Retain
 # Optional, if you want to add dynamic resize for PVC. Works for Kubernetes 1.14+

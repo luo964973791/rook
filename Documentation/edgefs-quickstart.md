@@ -8,6 +8,8 @@ indent: true
 
 # EdgeFS Data Fabric Quickstart
 
+[Deprecated](https://github.com/rook/rook/issues/5823#issuecomment-703834989)
+
 EdgeFS Data Fabric virtualzing common storage protocols and enables multi-cluster, multi-region data flow topologies.
 
 This guide will walk you through the basic setup of a EdgeFS cluster namespaces and enable you to consume S3 object, NFS/SMB file access, and iSCSI block storage
@@ -48,7 +50,7 @@ To turn off this node adjustment need to enable `skipHostPrepare` option in clus
 If you're feeling lucky, a simple EdgeFS Rook cluster can be created with the following kubectl commands. For the more detailed install, skip to the next section to [deploy the Rook operator](#deploy-the-rook-operator).
 
 ```console
-git clone --single-branch --branch {{ branchName }} https://github.com/rook/rook.git
+git clone --single-branch --branch v1.5.3 https://github.com/rook/rook.git
 cd rook/cluster/examples/kubernetes/edgefs
 kubectl create -f operator.yaml
 kubectl create -f cluster.yaml

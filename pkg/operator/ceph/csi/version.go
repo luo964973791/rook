@@ -27,10 +27,11 @@ import (
 var (
 	//minimum supported version is 2.0.0
 	minimum = CephCSIVersion{2, 0, 0}
-
 	//supportedCSIVersions are versions that rook supports
 	releaseV210          = CephCSIVersion{2, 1, 0}
-	supportedCSIVersions = []CephCSIVersion{minimum, releaseV210}
+	releasev300          = CephCSIVersion{3, 0, 0}
+	releasev310          = CephCSIVersion{3, 1, 0}
+	supportedCSIVersions = []CephCSIVersion{minimum, releaseV210, releasev300, releasev310}
 
 	// for parsing the output of `cephcsi`
 	versionCSIPattern = regexp.MustCompile(`v(\d+)\.(\d+)\.(\d+)`)
@@ -50,7 +51,7 @@ func (v *CephCSIVersion) String() string {
 
 // Supported checks if the detected version is part of the known supported CSI versions
 func (v *CephCSIVersion) Supported() bool {
-	if v.isAtLeast(&minimum) == false {
+	if !v.isAtLeast(&minimum) {
 		return false
 	}
 

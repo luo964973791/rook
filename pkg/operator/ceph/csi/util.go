@@ -30,6 +30,7 @@ import (
 	k8sutil "github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -53,12 +54,12 @@ func templateToService(name, templatePath string, p templateParam) (*corev1.Serv
 	var svc corev1.Service
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load service template")
+		return nil, errors.Wrap(err, "failed to load service template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &svc)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal service template")
+		return nil, errors.Wrap(err, "failed to unmarshal service template")
 	}
 	return &svc, nil
 }
@@ -67,12 +68,12 @@ func templateToStatefulSet(name, templatePath string, p templateParam) (*apps.St
 	var ss apps.StatefulSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load statefulset template")
+		return nil, errors.Wrap(err, "failed to load statefulset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ss)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal statefulset template")
+		return nil, errors.Wrap(err, "failed to unmarshal statefulset template")
 	}
 	return &ss, nil
 }
@@ -81,12 +82,12 @@ func templateToDaemonSet(name, templatePath string, p templateParam) (*apps.Daem
 	var ds apps.DaemonSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load daemonset template")
+		return nil, errors.Wrap(err, "failed to load daemonset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal daemonset template")
+		return nil, errors.Wrap(err, "failed to unmarshal daemonset template")
 	}
 	return &ds, nil
 }
@@ -95,7 +96,7 @@ func templateToDeployment(name, templatePath string, p templateParam) (*apps.Dep
 	var ds apps.Deployment
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load deployment template")
+		return nil, errors.Wrap(err, "failed to load deployment template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
@@ -218,4 +219,24 @@ func getPortFromConfig(clientset kubernetes.Interface, env string, defaultPort u
 		return defaultPort, errors.Errorf("%s port value is greater than 65535 for %s.", port, env)
 	}
 	return uint16(p), nil
+}
+
+// Get PodAntiAffinity from a key and value pair
+func GetPodAntiAffinity(key, value string) corev1.PodAntiAffinity {
+	return corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+			{
+				LabelSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{
+							Key:      key,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{value},
+						},
+					},
+				},
+				TopologyKey: corev1.LabelHostname,
+			},
+		},
+	}
 }

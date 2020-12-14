@@ -28,6 +28,7 @@ import (
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -41,9 +42,10 @@ import (
 )
 
 var (
-	name             = "my-nfs"
-	namespace        = "rook-ceph"
-	dummyVersionsRaw = `
+	name                      = "my-nfs"
+	namespace                 = "rook-ceph"
+	nfsCephAuthGetOrCreateKey = `{"key":"AQCvzWBeIV9lFRAAninzm+8XFxbSfTiPwoX50g=="}`
+	dummyVersionsRaw          = `
 	{
 		"mon": {
 			"ceph version 14.2.8 (3a54b2b6d167d4a2a19e003a705696d4fe619afc) nautilus (stable)": 3
@@ -71,6 +73,7 @@ var (
 )
 
 func TestCephNFSController(t *testing.T) {
+	ctx := context.TODO()
 	// Set DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 	os.Setenv("ROOK_LOG_LEVEL", "DEBUG")
@@ -97,7 +100,6 @@ func TestCephNFSController(t *testing.T) {
 		},
 		TypeMeta: controllerTypeMeta,
 	}
-	cephCluster := &cephv1.CephCluster{}
 
 	// Objects to track in the fake client.
 	object := []runtime.Object{
@@ -151,7 +153,7 @@ func TestCephNFSController(t *testing.T) {
 	//
 	// FAILURE we have a cluster but it's not ready
 	//
-	cephCluster = &cephv1.CephCluster{
+	cephCluster := &cephv1.CephCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespace,
 			Namespace: namespace,
@@ -182,7 +184,6 @@ func TestCephNFSController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -195,7 +196,7 @@ func TestCephNFSController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster
@@ -210,6 +211,9 @@ func TestCephNFSController(t *testing.T) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
+			if args[0] == "auth" && args[1] == "get-or-create-key" {
+				return nfsCephAuthGetOrCreateKey, nil
+			}
 			if args[0] == "versions" {
 				return dummyVersionsRaw, nil
 			}
@@ -222,6 +226,7 @@ func TestCephNFSController(t *testing.T) {
 			if command == "rados" {
 				logger.Infof("mock execute. %s. %s", command, args)
 				assert.Equal(t, "stat", args[6])
+				assert.Equal(t, "conf-my-nfs.a", args[7])
 				return nil
 			}
 			return errors.New("unknown command")
@@ -249,4 +254,27 @@ func TestCephNFSController(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "Ready", cephNFS.Status.Phase, cephNFS)
 	logger.Info("PHASE 3 DONE")
+}
+
+func TestGetGaneshaConfigObject(t *testing.T) {
+	cephNFS := &cephv1.CephNFS{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	nodeid := "a"
+	expectedName := "conf-nfs.ganesha-my-nfs"
+
+	res := getGaneshaConfigObject(cephNFS, cephver.CephVersion{Major: 16}, nodeid)
+	logger.Infof("Config Object for Pacific is %s", res)
+	assert.Equal(t, expectedName, res)
+
+	res = getGaneshaConfigObject(cephNFS, cephver.CephVersion{Major: 15, Minor: 2, Extra: 1}, nodeid)
+	logger.Infof("Config Object for Octopus is %s", res)
+	assert.Equal(t, expectedName, res)
+
+	res = getGaneshaConfigObject(cephNFS, cephver.CephVersion{Major: 14, Minor: 2, Extra: 5}, nodeid)
+	logger.Infof("Config Object for Nautilus is %s", res)
+	assert.Equal(t, "conf-my-nfs.a", res)
 }

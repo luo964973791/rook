@@ -19,13 +19,17 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/clusterd"
+	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCephArgs(t *testing.T) {
 	// cluster a under /etc
 	args := []string{}
-	command, args := FinalizeCephCommandArgs(CephTool, args, "/etc", "a", "client.admin")
+	clusterInfo := AdminClusterInfo("a")
+	command, args := FinalizeCephCommandArgs(CephTool, clusterInfo, args, "/etc")
 	assert.Equal(t, CephTool, command)
 	assert.Equal(t, 5, len(args))
 	assert.Equal(t, "--connect-timeout=15", args[0])
@@ -36,14 +40,14 @@ func TestCephArgs(t *testing.T) {
 
 	RunAllCephCommandsInToolbox = true
 	args = []string{}
-	command, args = FinalizeCephCommandArgs(CephTool, args, "/etc", "a", "client.admin")
+	command, args = FinalizeCephCommandArgs(CephTool, clusterInfo, args, "/etc")
 	assert.Equal(t, Kubectl, command)
 	assert.Equal(t, 8, len(args), fmt.Sprintf("%+v", args))
-	assert.Equal(t, "-it", args[0])
-	assert.Equal(t, "exec", args[1])
+	assert.Equal(t, "exec", args[0])
+	assert.Equal(t, "-i", args[1])
 	assert.Equal(t, "rook-ceph-tools", args[2])
 	assert.Equal(t, "-n", args[3])
-	assert.Equal(t, "a", args[4])
+	assert.Equal(t, clusterInfo.Namespace, args[4])
 	assert.Equal(t, "--", args[5])
 	assert.Equal(t, CephTool, args[6])
 	assert.Equal(t, "--connect-timeout=15", args[7])
@@ -51,19 +55,73 @@ func TestCephArgs(t *testing.T) {
 
 	// cluster under /var/lib/rook
 	args = []string{"myarg"}
-	command, args = FinalizeCephCommandArgs(RBDTool, args, "/var/lib/rook", "rook", "client.admin")
+	command, args = FinalizeCephCommandArgs(RBDTool, clusterInfo, args, "/var/lib/rook")
 	assert.Equal(t, RBDTool, command)
 	assert.Equal(t, 5, len(args))
 	assert.Equal(t, "myarg", args[0])
-	assert.Equal(t, "--cluster=rook", args[1])
-	assert.Equal(t, "--conf=/var/lib/rook/rook/rook.config", args[2])
+	assert.Equal(t, "--cluster="+clusterInfo.Namespace, args[1])
+	assert.Equal(t, "--conf=/var/lib/rook/a/a.config", args[2])
 	assert.Equal(t, "--name=client.admin", args[3])
-	assert.Equal(t, "--keyring=/var/lib/rook/rook/client.admin.keyring", args[4])
+	assert.Equal(t, "--keyring=/var/lib/rook/a/client.admin.keyring", args[4])
+}
 
-	// the default ceph cluster will not need the config args
-	args = []string{"myarg"}
-	command, args = FinalizeCephCommandArgs(CephTool, args, "/etc", "ceph", "client.admin")
-	assert.Equal(t, CephTool, command)
-	assert.Equal(t, 2, len(args))
-	assert.Equal(t, "myarg", args[0])
+func TestStretchElectionStrategy(t *testing.T) {
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		if args[0] == "mon" && args[1] == "set" && args[2] == "election_strategy" {
+			assert.Equal(t, "connectivity", args[3])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := EnableStretchElectionStrategy(context, clusterInfo)
+	assert.NoError(t, err)
+}
+
+func TestStretchClusterSettings(t *testing.T) {
+	monName := "a"
+	failureDomain := "rack"
+	zone := "rack-x"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "mon" && args[1] == "set_location":
+			assert.Equal(t, monName, args[2])
+			assert.Equal(t, fmt.Sprintf("%s=%s", failureDomain, zone), args[3])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := SetMonStretchZone(context, clusterInfo, monName, failureDomain, zone)
+	assert.NoError(t, err)
+}
+
+func TestStretchClusterMonTiebreaker(t *testing.T) {
+	monName := "a"
+	failureDomain := "rack"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "mon" && args[1] == "enable_stretch_mode":
+			assert.Equal(t, monName, args[2])
+			assert.Equal(t, defaultStretchCrushRuleName, args[3])
+			assert.Equal(t, failureDomain, args[4])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := SetMonStretchTiebreaker(context, clusterInfo, monName, failureDomain)
+	assert.NoError(t, err)
 }

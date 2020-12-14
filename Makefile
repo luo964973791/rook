@@ -146,7 +146,7 @@ codegen: ## Run code generators.
 mod.check: go.mod.check ## Check if any go modules changed.
 mod.update: go.mod.update ## Update all go modules.
 
-clean: ## Remove all files that are created by building.
+clean: csv-clean ## Remove all files that are created by building.
 	@$(MAKE) go.mod.clean
 	@$(MAKE) -C images clean
 	@rm -fr $(OUTPUT_DIR) $(WORK_DIR)
@@ -159,6 +159,9 @@ prune: ## Prune cached artifacts.
 
 csv-ceph: ## Generate a CSV file for OLM.
 	@cluster/olm/ceph/generate-rook-csv.sh $(CSV_VERSION) $(CSV_PLATFORM) $(ROOK_OP_VERSION)
+
+csv-clean: ## Remove existing OLM files.
+	@rm -fr cluster/olm/ceph/deploy/* cluster/olm/ceph/templates/*
 
 .PHONY: all build.common cross.build.parallel
 .PHONY: build build.all install test check vet fmt codegen mod.check clean distclean prune
@@ -181,6 +184,6 @@ export HELPTEXT
 help: ## Show this help menu.
 	@echo "Usage: make [TARGET ...]"
 	@echo ""
-	@grep --no-filename -E '^[a-zA-Z_%-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@grep --no-filename -E '^[a-zA-Z_%-. ]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$$HELPTEXT"

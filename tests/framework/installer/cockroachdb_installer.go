@@ -17,10 +17,12 @@ limitations under the License.
 package installer
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/rook/rook/tests/framework/utils"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -119,13 +121,14 @@ func (h *CockroachDBInstaller) CreateCockroachDBCluster(namespace string, count 
 }
 
 func (h *CockroachDBInstaller) UninstallCockroachDB(systemNamespace, namespace string) {
+	ctx := context.TODO()
 	logger.Infof("uninstalling cockroachdb from namespace %s", namespace)
 
 	err := h.k8shelper.DeleteResourceAndWait(false, "-n", namespace, "cluster.cockroachdb.rook.io", namespace)
 	checkError(h.T(), err, fmt.Sprintf("cannot remove cluster %s", namespace))
 
 	crdCheckerFunc := func() error {
-		_, err := h.k8shelper.RookClientset.CockroachdbV1alpha1().Clusters(namespace).Get(namespace, metav1.GetOptions{})
+		_, err := h.k8shelper.RookClientset.CockroachdbV1alpha1().Clusters(namespace).Get(ctx, namespace, metav1.GetOptions{})
 		return err
 	}
 	err = h.k8shelper.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
@@ -145,15 +148,16 @@ func (h *CockroachDBInstaller) UninstallCockroachDB(systemNamespace, namespace s
 	err = UninstallHostPathProvisioner(h.k8shelper)
 	checkError(h.T(), err, "cannot uninstall hostpath provisioner")
 
-	h.k8shelper.Clientset.RbacV1beta1().ClusterRoleBindings().Delete("anon-user-access", nil)
+	err = h.k8shelper.Clientset.RbacV1().ClusterRoleBindings().Delete(ctx, "anon-user-access", metav1.DeleteOptions{})
+	assert.NoError(h.T(), err)
 	logger.Infof("done removing the operator from namespace %s", systemNamespace)
 }
 
 func (h *CockroachDBInstaller) GatherAllCockroachDBLogs(systemNamespace, namespace, testName string) {
-	if !h.T().Failed() && Env.Logs != "all" {
+	if !h.T().Failed() && TestLogCollectionLevel() != "all" {
 		return
 	}
 	logger.Infof("Gathering all logs from cockroachdb cluster %s", namespace)
-	h.k8shelper.GetLogsFromNamespace(systemNamespace, testName, Env.HostType)
-	h.k8shelper.GetLogsFromNamespace(namespace, testName, Env.HostType)
+	h.k8shelper.GetLogsFromNamespace(systemNamespace, testName, utils.TestEnvName())
+	h.k8shelper.GetLogsFromNamespace(namespace, testName, utils.TestEnvName())
 }

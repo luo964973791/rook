@@ -17,6 +17,7 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 
 	edgefsv1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1"
@@ -38,6 +39,7 @@ const (
 // to all the nodes in the cluster. This way configuration is simplified and
 // available to all subcomponents at any point it time.
 func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploymentConfig, resurrect bool) error {
+	ctx := context.TODO()
 	var err error
 	cm := make(map[string]edgefsv1.SetupNode)
 
@@ -112,7 +114,7 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 			// In resurrection case we only need to adjust networking selections
 			// in ccow.json, ccowd.json and corosync.conf. And keep device transport
 			// same as before. Resurrection is "best effort" feature, we cannot
-			// guarnatee that cluster can be reconfigured, but at least we do try.
+			// guarantee that cluster can be reconfigured, but at least we do try.
 
 			rtDevices = make([]edgefsv1.RTDevice, 0)
 			rtSlaveDevices = make([]edgefsv1.RTDevices, 0)
@@ -132,7 +134,7 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 			case "zone":
 				failureDomain = 2
 			default:
-				logger.Infof("Unknow failure domain %s, skipped", c.Spec.FailureDomain)
+				logger.Infof("Unknown failure domain %s, skipped", c.Spec.FailureDomain)
 			}
 		}
 		commitWait := 1
@@ -229,9 +231,9 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 	}
 
 	k8sutil.SetOwnerRef(&configMap.ObjectMeta, &c.ownerRef)
-	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(configMap); err != nil {
+	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
 		if errors.IsAlreadyExists(err) {
-			if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(configMap); err != nil {
+			if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(ctx, configMap, metav1.UpdateOptions{}); err != nil {
 				return nil
 			}
 		} else {

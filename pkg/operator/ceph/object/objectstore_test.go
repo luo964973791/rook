@@ -17,6 +17,7 @@ limitations under the License.
 package object
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -32,27 +34,36 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+const (
+	dashboardAdminCreateJSON = `{
+    "user_id": "dashboard-admin",
+    "display_name": "dashboard-admin",
+    "email": "",
+    "suspended": 0,
+    "max_buckets": 1000,
+    "subusers": [],
+    "keys": [
+        {
+            "user": "dashboard-admin",
+            "access_key": "VFKF8SSU9L3L2UR03Z8C",
+            "secret_key": "5U4e2MkXHgXstfWkxGZOI6AXDfVUkDDHM7Dwc3mY"
+        }
+    ],
+    "swift_keys": [],
+    "caps": [],
+    "op_mask": "read, write, delete",
+    "system": "true",
+    "temp_url_keys": [],
+    "type": "rgw",
+    "mfa_ids": []
+}`
+	access_key = "VFKF8SSU9L3L2UR03Z8C"
+)
+
 func TestReconcileRealm(t *testing.T) {
-	defaultStore := true
 	executorFunc := func(command string, args ...string) (string, error) {
 		idResponse := `{"id":"test-id"}`
 		logger.Infof("Execute: %s %v", command, args)
-		if args[1] == "get" {
-			return "", errors.New("induce a create")
-		} else if args[1] == "create" {
-			for _, arg := range args {
-				if arg == "--default" {
-					assert.True(t, defaultStore, "did not expect to find --default in %v", args)
-					return idResponse, nil
-				}
-			}
-			assert.False(t, defaultStore, "did not find --default flag in %v", args)
-		} else if args[0] == "realm" && args[1] == "list" {
-			if defaultStore {
-				return "", errors.New("failed to run radosgw-admin: Failed to complete : exit status 2")
-			}
-			return `{"realms": ["myobj"]}`, nil
-		}
 		return idResponse, nil
 	}
 	executor := &exectest.MockExecutor{
@@ -62,14 +73,14 @@ func TestReconcileRealm(t *testing.T) {
 
 	storeName := "myobject"
 	context := &clusterd.Context{Executor: executor}
-	objContext := NewContext(context, storeName, "mycluster")
+	objContext := NewContext(context, &client.ClusterInfo{Namespace: "mycluster"}, storeName)
 	// create the first realm, marked as default
-	err := reconcileRealm(objContext, "1.2.3.4", 80)
+	store := cephv1.CephObjectStore{}
+	err := setMultisite(objContext, &store, "1.2.3.4")
 	assert.Nil(t, err)
 
 	// create the second realm, not marked as default
-	defaultStore = false
-	err = reconcileRealm(objContext, "2.3.4.5", 80)
+	err = setMultisite(objContext, &store, "2.3.4.5")
 	assert.Nil(t, err)
 }
 
@@ -156,7 +167,7 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 	}
 	executor.MockExecuteCommandWithOutput = executorFunc
 	executor.MockExecuteCommandWithCombinedOutput = executorFunc
-	context := &Context{Context: &clusterd.Context{Executor: executor}, Name: "myobj", ClusterName: "ns"}
+	context := &Context{Context: &clusterd.Context{Executor: executor}, Name: "myobj", clusterInfo: &client.ClusterInfo{Namespace: "ns"}}
 
 	// Delete an object store without deleting the pools
 	spec := cephv1.ObjectStoreSpec{}
@@ -187,6 +198,7 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 }
 
 func TestGetObjectBucketProvisioner(t *testing.T) {
+	ctx := context.TODO()
 	k8s := fake.NewSimpleClientset()
 	operatorSettingConfigMapName := "rook-ceph-operator-config"
 	testNamespace := "test-namespace"
@@ -203,16 +215,52 @@ func TestGetObjectBucketProvisioner(t *testing.T) {
 		Data: watchOperatorNamespace,
 	}
 
-	_, err := k8s.CoreV1().ConfigMaps(testNamespace).Create(cm)
+	_, err := k8s.CoreV1().ConfigMaps(testNamespace).Create(ctx, cm, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	bktprovisioner := GetObjectBucketProvisioner(context, testNamespace)
 	assert.Equal(t, fmt.Sprintf("%s.%s", testNamespace, bucketProvisionerName), bktprovisioner)
 
 	cm.Data = ignoreOperatorNamespace
-	_, err = k8s.CoreV1().ConfigMaps(testNamespace).Update(cm)
+	_, err = k8s.CoreV1().ConfigMaps(testNamespace).Update(ctx, cm, metav1.UpdateOptions{})
 	assert.NoError(t, err)
 
 	bktprovisioner = GetObjectBucketProvisioner(context, testNamespace)
 	assert.Equal(t, bucketProvisionerName, bktprovisioner)
+}
+
+func TestDashboard(t *testing.T) {
+	storeName := "myobject"
+	executor := &exectest.MockExecutor{
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			return "", nil
+		},
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			if args[0] == "user" {
+				return dashboardAdminCreateJSON, nil
+			}
+			return "", nil
+		},
+	}
+	context := &clusterd.Context{Executor: executor}
+	objContext := NewContext(context, &client.ClusterInfo{Namespace: "mycluster"}, storeName)
+	checkdashboard, err := checkDashboardUser(objContext)
+	assert.NoError(t, err)
+	assert.False(t, checkdashboard)
+	err = enableRGWDashboard(objContext)
+	assert.Nil(t, err)
+	executor = &exectest.MockExecutor{
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			if args[0] == "dashboard" && args[1] == "get-rgw-api-access-key" {
+				return access_key, nil
+			}
+			return "", nil
+		},
+	}
+	objContext.Context.Executor = executor
+	checkdashboard, err = checkDashboardUser(objContext)
+	assert.NoError(t, err)
+	assert.True(t, checkdashboard)
+	err = disableRGWDashboard(objContext)
+	assert.Nil(t, err)
 }

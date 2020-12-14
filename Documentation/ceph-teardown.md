@@ -54,6 +54,7 @@ This includes related resources such as the agent and discover daemonsets with t
 ```console
 kubectl delete -f operator.yaml
 kubectl delete -f common.yaml
+kubectl delete -f crds.yaml
 ```
 
 ## Delete the data on hosts
@@ -76,7 +77,10 @@ DISK="/dev/sdb"
 # Zap the disk to a fresh, usable state (zap-all is important, b/c MBR has to be clean)
 # You will have to run this step for all disks.
 sgdisk --zap-all $DISK
+# Clean hdds with dd
 dd if=/dev/zero of="$DISK" bs=1M count=100 oflag=direct,dsync
+# Clean disks such as ssd with blkdiscard instead of dd
+blkdiscard $DISK
 
 # These steps only have to be run once on each node
 # If rook sets up osds using ceph-volume, teardown leaves some devices mapped that lock the disks.
@@ -115,7 +119,17 @@ The operator is responsible for removing the finalizer after the mounts have bee
 If for some reason the operator is not able to remove the finalizer (ie. the operator is not running anymore), you can delete the finalizer manually with the following command:
 
 ```console
-kubectl -n rook-ceph patch crd cephclusters.ceph.rook.io --type merge -p '{"metadata":{"finalizers": [null]}}'
+for CRD in $(kubectl get crd -n rook-ceph | awk '/ceph.rook.io/ {print $1}'); do kubectl patch crd -n rook-ceph $CRD --type merge -p '{"metadata":{"finalizers": [null]}}'; done
+```
+
+This command will patch the following CRDs on v1.3:
+```console
+cephblockpools.ceph.rook.io
+cephclients.ceph.rook.io
+cephfilesystems.ceph.rook.io
+cephnfses.ceph.rook.io
+cephobjectstores.ceph.rook.io
+cephobjectstoreusers.ceph.rook.io
 ```
 
 Within a few seconds you should see that the cluster CRD has been deleted and will no longer block other cleanup such as deleting the `rook-ceph` namespace.

@@ -40,12 +40,15 @@ type CustomResource struct {
 
 	// Kind is the serialized interface of the resource.
 	Kind string
+
+	// APIVersion is the full API version name (combine Group and Version)
+	APIVersion string
 }
 
 // WatchCR begins watching the custom resource (CRD). The call will block until a Done signal is raised during in the context.
 // When the watch has detected a create, update, or delete event, it will handled by the functions in the resourceEventHandlers. After the callback returns, the watch loop will continue for the next event.
 // If the callback returns an error, the error will be logged.
-func WatchCR(resource CustomResource, namespace string, handlers cache.ResourceEventHandlerFuncs, client rest.Interface, objType runtime.Object, done <-chan struct{}) error {
+func WatchCR(resource CustomResource, namespace string, handlers cache.ResourceEventHandlerFuncs, client rest.Interface, objType runtime.Object, done <-chan struct{}) {
 	source := cache.NewListWatchFromClient(
 		client,
 		resource.Plural,
@@ -67,5 +70,4 @@ func WatchCR(resource CustomResource, namespace string, handlers cache.ResourceE
 
 	go controller.Run(done)
 	<-done
-	return nil
 }

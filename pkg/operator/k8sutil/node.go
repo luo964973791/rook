@@ -18,6 +18,7 @@ limitations under the License.
 package k8sutil
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -87,16 +88,13 @@ func GetValidNodes(rookStorage rookv1.StorageScopeSpec, clientset kubernetes.Int
 	return RookNodesMatchingKubernetesNodes(rookStorage, validK8sNodes)
 }
 
-func generateUniqueVolumeSourceName(sourceName, pvcName string) string {
-	return fmt.Sprintf("%s-%s", sourceName, pvcName)
-}
-
 // GetNodeNameFromHostname returns the name of the node resource looked up by the hostname label
 // Typically these will be the same name, but sometimes they are not such as when nodes have a longer
 // dns name, but the hostname is short.
 func GetNodeNameFromHostname(clientset kubernetes.Interface, hostName string) (string, error) {
+	ctx := context.TODO()
 	options := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", v1.LabelHostname, hostName)}
-	nodes, err := clientset.CoreV1().Nodes().List(options)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, options)
 	if err != nil {
 		return hostName, err
 	}
@@ -109,7 +107,8 @@ func GetNodeNameFromHostname(clientset kubernetes.Interface, hostName string) (s
 
 // GetNodeHostName returns the hostname label given the node name.
 func GetNodeHostName(clientset kubernetes.Interface, nodeName string) (string, error) {
-	node, err := clientset.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	ctx := context.TODO()
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -128,7 +127,8 @@ func GetNodeHostNameLabel(node *v1.Node) (string, error) {
 // Typically these will be the same name, but sometimes they are not such as when nodes have a longer
 // dns name, but the hostname is short.
 func GetNodeHostNames(clientset kubernetes.Interface) (map[string]string, error) {
-	nodes, err := clientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	ctx := context.TODO()
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +146,7 @@ func GetNodeHostNames(clientset kubernetes.Interface) (map[string]string, error)
 func GetNodeSchedulable(node v1.Node) bool {
 	// some unit tests set this to quickly emulate an unschedulable node; if this is set to true,
 	// we can shortcut deeper inspection for schedulability.
-	if node.Spec.Unschedulable {
-		return false
-	}
-	return true
+	return !node.Spec.Unschedulable
 }
 
 // NodeMeetsPlacementTerms returns true if the Rook placement allows the node to have resources scheduled
@@ -201,7 +198,8 @@ func NodeIsTolerable(node v1.Node, tolerations []v1.Toleration, ignoreWellKnownT
 		}
 		isTolerated := false
 		for _, toleration := range tolerations {
-			if toleration.ToleratesTaint(&taint) {
+			localtaint := taint
+			if toleration.ToleratesTaint(&localtaint) {
 				isTolerated = true
 				break
 			}
@@ -237,13 +235,20 @@ func normalizeHostname(kubernetesNode v1.Node) string {
 	return hostname
 }
 
+// GetNormalizedHostname returns the normalized hostname of the Kubernetes node. Rook uses
+// normalized hostnames as its internal reference for nodes.
+func GetNormalizedHostname(kubernetesNode v1.Node) string {
+	return normalizeHostname(kubernetesNode)
+}
+
 // GetKubernetesNodesMatchingRookNodes lists all the nodes in Kubernetes and returns all the
 // Kubernetes nodes that have a corresponding match in the list of Rook nodes.
 func GetKubernetesNodesMatchingRookNodes(rookNodes []rookv1.Node, clientset kubernetes.Interface) ([]v1.Node, error) {
+	ctx := context.TODO()
 	nodes := []v1.Node{}
 	nodeOptions := metav1.ListOptions{}
 	nodeOptions.TypeMeta.Kind = "Node"
-	k8sNodes, err := clientset.CoreV1().Nodes().List(nodeOptions)
+	k8sNodes, err := clientset.CoreV1().Nodes().List(ctx, nodeOptions)
 	if err != nil {
 		return nodes, fmt.Errorf("failed to list kubernetes nodes. %+v", err)
 	}
@@ -285,7 +290,7 @@ func ExtractTopologyFromLabels(labels map[string]string, additionalTopologyIDs [
 
 	// check for the region k8s topology label that is GA in 1.17.
 	// TODO: Replace with a const when we update to the K8s 1.17 go-client.
-	region, ok = labels["topology.kubernetes.io/region"]
+	region, ok = labels[corev1.LabelZoneRegionStable]
 	if ok {
 		topology[regionLabel] = region
 	}
@@ -299,7 +304,7 @@ func ExtractTopologyFromLabels(labels map[string]string, additionalTopologyIDs [
 
 	// check for the zone k8s topology label that is GA in 1.17.
 	// TODO: Replace with a const when we update to the K8s 1.17 go-client.
-	zone, ok = labels["topology.kubernetes.io/zone"]
+	zone, ok = labels[corev1.LabelZoneFailureDomainStable]
 	if ok {
 		topology[zoneLabel] = zone
 	}

@@ -3,8 +3,7 @@
 ```javascript
 git clone https://github.com/luo964973791/rook.git
 cd rook/cluster/examples/kubernetes/ceph
-kubectl create -f common.yaml
-kubectl create -f operator.yaml
+kubectl create -f crds.yaml -f common.yaml -f operator.yaml
 
 #注意需要更改cluster.yaml里面的磁盘信息
 kubectl create -f cluster.yaml
@@ -39,4 +38,3 @@ kubectl -n rook-ceph get secret rook-ceph-dashboard-password -o jsonpath="{['dat
 yum install gdisk -y
 sgdisk --zap-all /dev/sdb
 ```
-

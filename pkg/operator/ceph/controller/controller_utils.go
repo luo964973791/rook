@@ -18,10 +18,15 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/operator/k8sutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -33,13 +38,47 @@ const OperatorSettingConfigMapName string = "rook-ceph-operator-config"
 var (
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
-	// WaitForRequeueIfCephClusterNotReadyAfter requeue after 10sec if the operator is not ready
-	WaitForRequeueIfCephClusterNotReadyAfter = 10 * time.Second
+
 	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
-	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: WaitForRequeueIfCephClusterNotReadyAfter}
+	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
+
 	// WaitForRequeueIfFinalizerBlocked waits for resources to be cleaned up before the finalizer can be removed
 	WaitForRequeueIfFinalizerBlocked = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
+
+	// OperatorCephBaseImageVersion is the ceph version in the operator image
+	OperatorCephBaseImageVersion string
 )
+
+// CheckForCancelledOrchestration checks whether a cancellation has been requested
+func CheckForCancelledOrchestration(context *clusterd.Context) error {
+	defer context.RequestCancelOrchestration.UnSet()
+
+	// Check whether we need to cancel the orchestration
+	if context.RequestCancelOrchestration.IsSet() {
+		return errors.New("CANCELLING CURRENT ORCHESTATION")
+	}
+
+	return nil
+}
+
+// canIgnoreHealthErrStatusInReconcile determines whether a status of HEALTH_ERR in the CephCluster can be ignored safely.
+func canIgnoreHealthErrStatusInReconcile(cephCluster cephv1.CephCluster, controllerName string) bool {
+	// Get a list of all the keys causing the HEALTH_ERR status.
+	var healthErrKeys = make([]string, 0)
+	for key, health := range cephCluster.Status.CephStatus.Details {
+		if health.Severity == "HEALTH_ERR" {
+			healthErrKeys = append(healthErrKeys, key)
+		}
+	}
+
+	// If there is only one cause for HEALTH_ERR and it's on the allowed list of errors, ignore it.
+	var allowedErrStatus = []string{"MDS_ALL_DOWN"}
+	var ignoreHealthErr = len(healthErrKeys) == 1 && contains(allowedErrStatus, healthErrKeys[0])
+	if ignoreHealthErr {
+		logger.Debugf("%q: ignoring ceph status %q because only cause is %q (full status is %q)", controllerName, cephCluster.Status.CephStatus.Health, healthErrKeys[0], cephCluster.Status.CephStatus)
+	}
+	return ignoreHealthErr
+}
 
 // IsReadyToReconcile determines if a controller is ready to reconcile or not
 func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, namespacedName types.NamespacedName, controllerName string) (cephv1.CephCluster, bool, bool, reconcile.Result) {
@@ -51,11 +90,11 @@ func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, names
 	clusterList := &cephv1.CephClusterList{}
 	err := c.List(context.TODO(), clusterList, client.InNamespace(namespacedName.Namespace))
 	if err != nil {
-		logger.Errorf("%q:failed to fetch CephCluster %v", controllerName, err)
+		logger.Errorf("%q: failed to fetch CephCluster %v", controllerName, err)
 		return cephCluster, false, cephClusterExists, ImmediateRetryResult
 	}
 	if len(clusterList.Items) == 0 {
-		logger.Errorf("%q: no CephCluster resource found in namespace %q", controllerName, namespacedName.Namespace)
+		logger.Debugf("%q: no CephCluster resource found in namespace %q", controllerName, namespacedName.Namespace)
 		return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
 	}
 	cephClusterExists = true
@@ -65,12 +104,37 @@ func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, names
 
 	// read the CR status of the cluster
 	if cephCluster.Status.CephStatus != nil {
-		if cephCluster.Status.CephStatus.Health == "HEALTH_OK" || cephCluster.Status.CephStatus.Health == "HEALTH_WARN" {
+		var operatorDeploymentOk = cephCluster.Status.CephStatus.Health == "HEALTH_OK" || cephCluster.Status.CephStatus.Health == "HEALTH_WARN"
+
+		if operatorDeploymentOk || canIgnoreHealthErrStatusInReconcile(cephCluster, controllerName) {
 			logger.Debugf("%q: ceph status is %q, operator is ready to run ceph command, reconciling", controllerName, cephCluster.Status.CephStatus.Health)
 			return cephCluster, true, cephClusterExists, WaitForRequeueIfCephClusterNotReady
 		}
+
 		logger.Infof("%s: CephCluster %q found but skipping reconcile since ceph health is %q", controllerName, cephCluster.Name, cephCluster.Status.CephStatus)
 	}
 
 	return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
+}
+
+// ClusterOwnerRef represents the owner reference of the CephCluster CR
+func ClusterOwnerRef(clusterName, clusterID string) metav1.OwnerReference {
+	blockOwner := true
+	return metav1.OwnerReference{
+		APIVersion:         fmt.Sprintf("%s/%s", ClusterResource.Group, ClusterResource.Version),
+		Kind:               ClusterResource.Kind,
+		Name:               clusterName,
+		UID:                types.UID(clusterID),
+		BlockOwnerDeletion: &blockOwner,
+	}
+}
+
+// ClusterResource operator-kit Custom Resource Definition
+var ClusterResource = k8sutil.CustomResource{
+	Name:       "cephcluster",
+	Plural:     "cephclusters",
+	Group:      cephv1.CustomResourceGroup,
+	Version:    cephv1.Version,
+	Kind:       reflect.TypeOf(cephv1.CephCluster{}).Name(),
+	APIVersion: fmt.Sprintf("%s/%s", cephv1.CustomResourceGroup, cephv1.Version),
 }

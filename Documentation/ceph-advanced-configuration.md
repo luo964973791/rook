@@ -72,7 +72,7 @@ For more information on using the Ceph feature to limit access to CephFS paths, 
 **This ClusterRole is needed no matter if you want to use a RoleBinding per namespace or a ClusterRoleBinding.**
 
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-agent-mount
@@ -101,7 +101,7 @@ Replace `namespace: name-of-namespace-with-mountsecret` according to the name of
 
 ```yaml
 kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: rook-ceph-agent-mount
   namespace: name-of-namespace-with-mountsecret
@@ -124,7 +124,7 @@ This ClusterRoleBinding only needs to be created once, as it covers the whole cl
 
 ```yaml
 kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: rook-ceph-agent-mount
   labels:
@@ -145,7 +145,7 @@ subjects:
 All Rook logs can be collected in a Kubernetes environment with the following command:
 
 ```console
-(for p in $(kubectl -n rook-ceph get pods -o jsonpath='{.items[*].metadata.name}')
+for p in $(kubectl -n rook-ceph get pods -o jsonpath='{.items[*].metadata.name}')
 do
     for c in $(kubectl -n rook-ceph get pod ${p} -o jsonpath='{.spec.containers[*].name}')
     do
@@ -178,7 +178,7 @@ do
  echo "Pod:  ${pod}"
  echo "Node: $(kubectl -n rook-ceph get pod ${pod} -o jsonpath='{.spec.nodeName}')"
  kubectl -n rook-ceph exec ${pod} -- sh -c '\
-  for i in /var/lib/rook/osd*; do
+  for i in /var/lib/ceph/osd/ceph-*; do
     [ -f ${i}/ready ] || continue
     echo -ne "-$(basename ${i}) "
     echo $(lsblk -n -o NAME,SIZE ${i}/block 2> /dev/null || \
@@ -188,7 +188,7 @@ do
 done
 ```
 
-The output should look something like this. Note that OSDs on the same node will show duplicate information.
+The output should look something like this.
 
 ```console
 Pod:  osd-m2fz2
@@ -239,12 +239,8 @@ a common practice for those looking to target certain workloads onto faster
 ### Placement Group Sizing
 
 > **NOTE**: Since Ceph Nautilus (v14.x), you can use the Ceph MGR `pg_autoscaler`
-> module to auto scale the PGs as needed, for more information on this topic
-> checkout [Ceph New in Nautilus: PG merging and autotuning](https://ceph.io/rados/new-in-nautilus-pg-merging-and-autotuning/) article.
->
-> To enable the `pg_autoscaler` module automatically in a Rook Ceph cluster,
-> you can add the `pg_autoscaler` entry in the `spec.mgr.modules`
-> struct of CephCluster CRD.
+> module to auto scale the PGs as needed. If you want to enable this feature,
+> please refer to [Default PG and PGP counts](ceph-configuration.md#default-pg-and-pgp-counts).
 
 The general rules for deciding how many PGs your pool(s) should contain is:
 
@@ -425,7 +421,7 @@ For example,
 
 ```yaml
   network:
-    hostNetwork: true
+    provider: host
 ```
 
 > IMPORTANT: Changing this setting is not supported in a running Rook cluster. Host networking

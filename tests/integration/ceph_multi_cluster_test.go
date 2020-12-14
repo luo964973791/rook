@@ -18,15 +18,21 @@ package integration
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/tests/framework/clients"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+)
+
+const (
+	localPathPVCmd = "tests/scripts/localPathPV.sh"
 )
 
 // *************************************************************
@@ -36,7 +42,7 @@ import (
 // Monitors
 // - One mon in each cluster
 // OSDs
-// - Bluestore running on a directory
+// - Bluestore running on a raw block device
 // Block
 // - Create a pool in each cluster
 // - Mount/unmount a block device through the dynamic provisioner
@@ -92,7 +98,8 @@ func (mrc *MultiClusterDeploySuite) createPools() {
 func (mrc *MultiClusterDeploySuite) deletePools() {
 	// create a test pool in each cluster so that we get some PGs
 	logger.Infof("Deleting pool %s", mrc.poolName)
-	if err := mrc.testClient.PoolClient.DeletePool(mrc.testClient.BlockClient, mrc.namespace1, mrc.poolName); err != nil {
+	clusterInfo := client.AdminClusterInfo(mrc.namespace1)
+	if err := mrc.testClient.PoolClient.DeletePool(mrc.testClient.BlockClient, clusterInfo, mrc.poolName); err != nil {
 		logger.Errorf("failed to delete pool %q. %v", mrc.poolName, err)
 	} else {
 		logger.Infof("deleted pool %q", mrc.poolName)
@@ -135,11 +142,10 @@ func NewMCTestOperations(t func() *testing.T, namespace1 string, namespace2 stri
 	checkIfShouldRunForMinimalTestMatrix(t, kh, multiClusterMinimalTestVersion)
 
 	cleanupHost := false
-	i := installer.NewCephInstaller(t, kh.Clientset, false, installer.VersionMaster, installer.NautilusVersion, cleanupHost)
+	i := installer.NewCephInstaller(t, kh.Clientset, false, "", installer.VersionMaster, installer.NautilusVersion, cleanupHost)
 
 	op := &MCTestOperations{i, kh, t, namespace1, namespace2, installer.SystemNamespace(namespace1), "", false}
-	p := kh.IsStorageClassPresent("manual")
-	if p == nil && kh.VersionAtLeast("v1.13.0") {
+	if kh.VersionAtLeast("v1.13.0") {
 		op.testOverPVC = true
 		op.storageClassName = "manual"
 	}
@@ -147,9 +153,18 @@ func NewMCTestOperations(t func() *testing.T, namespace1 string, namespace2 stri
 	return op, kh
 }
 
-// SetUpRook is wrapper for setting up multiple rook clusters.
+// Setup is wrapper for setting up multiple rook clusters.
 func (o MCTestOperations) Setup() {
 	var err error
+	if o.testOverPVC {
+		root, err := utils.FindRookRoot()
+		require.NoError(o.T(), err, "failed to get rook root")
+		cmdArgs := utils.CommandArgs{Command: filepath.Join(root, localPathPVCmd),
+			CmdArgs: []string{installer.TestScratchDevice()}}
+		cmdOut := utils.ExecuteCommand(cmdArgs)
+		require.NoError(o.T(), cmdOut.Err)
+	}
+
 	err = o.installer.CreateCephOperator(installer.SystemNamespace(o.namespace1))
 	require.NoError(o.T(), err)
 
@@ -176,7 +191,7 @@ func (o MCTestOperations) Setup() {
 	logger.Infof("finished starting clusters")
 }
 
-// TearDownRook is a wrapper for tearDown after suite
+// Teardown is a wrapper for tearDown after suite
 func (o MCTestOperations) Teardown() {
 	o.installer.UninstallRookFromMultipleNS(installer.SystemNamespace(o.namespace1), o.namespace1, o.namespace2)
 }
@@ -184,7 +199,7 @@ func (o MCTestOperations) Teardown() {
 func (o MCTestOperations) startCluster(namespace, store string) error {
 	logger.Infof("starting cluster %s", namespace)
 	err := o.installer.CreateRookCluster(namespace, o.systemNamespace, store, o.testOverPVC, o.storageClassName,
-		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, 1, installer.NautilusVersion)
+		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, false, installer.NautilusVersion)
 	if err != nil {
 		o.T().Fail()
 		o.installer.GatherAllRookLogs(o.T().Name(), namespace, o.systemNamespace)

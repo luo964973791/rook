@@ -35,7 +35,13 @@ var (
 )
 
 func supportedDeviceType(device string) bool {
-	return device == sys.DiskType || device == sys.SSDType || device == sys.LVMType || device == sys.MultiPath || device == sys.PartType || device == sys.LinearType
+	return device == sys.DiskType ||
+		device == sys.SSDType ||
+		device == sys.CryptType ||
+		device == sys.LVMType ||
+		device == sys.MultiPath ||
+		device == sys.PartType ||
+		device == sys.LinearType
 }
 
 // GetDeviceEmpty check whether a device is completely empty
@@ -66,8 +72,7 @@ func DiscoverDevices(executor exec.Executor) ([]*sys.LocalDisk, error) {
 		// Populate device information coming from lsblk
 		disk, err := PopulateDeviceInfo(d, executor)
 		if err != nil {
-			// skip device if lsblk fails
-			logger.Warningf("skipping device %q because 'lsblk' failed. %v", d, err)
+			logger.Warningf("skipping device %q. %v", d, err)
 			continue
 		}
 
@@ -154,6 +159,9 @@ func PopulateDeviceInfo(d string, executor exec.Executor) (*sys.LocalDisk, error
 	}
 	if val, ok := diskProps["NAME"]; ok {
 		disk.RealPath = val
+	}
+	if val, ok := diskProps["KNAME"]; ok {
+		disk.KernelName = path.Base(val)
 	}
 
 	return disk, nil
