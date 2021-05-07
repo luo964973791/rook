@@ -19,7 +19,7 @@ cd rook/cluster/examples/kubernetes/ceph/csi/cephfs
 kubectl create -f storageclass.yaml
 kubectl create -f pvc.yaml
 kubectl create -f pod.yaml
-#挂载
+#挂载,cp容器里ceph.repo到主机上.
 yum install ceph-fuse -y
 echo "ceph-fuse -m 10.233.39.242:6789,10.233.47.20:6789,10.233.2.92:6789 /data -n client.admin --keyring=/etc/ceph/keyring" >> /etc/rc.local
 ```
